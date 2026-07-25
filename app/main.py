@@ -34,6 +34,23 @@ UPDATE_CHECK_SECONDS = 6 * 60 * 60
 _NO_WINDOW = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 
+def _windowless_python() -> str:
+    """Interpreter to spawn children with -- pythonw.exe where it exists.
+
+    sys.executable is not good enough on Windows: uv's venv pythonw.exe is a
+    trampoline that re-execs the console-subsystem base interpreter, so
+    sys.executable inside the tray reports python.exe. Spawning children with
+    that relies entirely on CREATE_NO_WINDOW to suppress a console; naming
+    pythonw.exe explicitly means there is no console to suppress in the first
+    place.
+    """
+    if sys.platform == "win32":
+        pythonw = ROOT / ".venv/Scripts/pythonw.exe"
+        if pythonw.exists():
+            return str(pythonw)
+    return sys.executable
+
+
 class TrayApp:
     def __init__(self) -> None:
         from .backend import Api
@@ -52,10 +69,31 @@ class TrayApp:
             return  # already open; the OS will surface it
         try:
             self.window_proc = subprocess.Popen(
-                [sys.executable, "-m", "app.window"], cwd=str(ROOT), **_NO_WINDOW
+                [_windowless_python(), "-m", "app.window"], cwd=str(ROOT), **_NO_WINDOW
             )
         except OSError as exc:
             self._notify(f"Could not open the dashboard: {exc}")
+
+    def serve_open_requests(self, lock: socket.socket) -> None:
+        """Accept 'open' pings from a second launch of the shortcut.
+
+        The single-instance lock is already a listening socket, so this costs
+        nothing extra: a later process connects, we open the dashboard. Errors
+        are swallowed deliberately -- an unrelated program probing the port
+        must never take down the tray.
+        """
+        while not self._stop.is_set():
+            try:
+                conn, _ = lock.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.settimeout(1)
+                    if b"open" in conn.recv(32):
+                        self.open_dashboard()
+                except OSError:
+                    continue
 
     # -------------------------------------------------------- menu actions
     def _threaded(self, fn, *args) -> None:
@@ -220,13 +258,42 @@ def _acquire_single_instance() -> socket.socket | None:
     return None
 
 
+def _signal_running_instance() -> bool:
+    """Ask an already-running tray to show its dashboard.
+
+    Without this, clicking the Start-menu shortcut while rememory is already
+    in the tray does nothing visible at all: the second process finds the lock
+    held and exits. Under pythonw there is no console, so even the explanatory
+    message goes nowhere. Handing the request to the running instance is what
+    the user actually meant by clicking the icon.
+    """
+    for port in LOCK_PORT_RANGE:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1) as sock:
+                sock.sendall(b"open\n")
+            return True
+        except OSError:
+            continue
+    return False
+
+
 def main() -> int:
     lock = _acquire_single_instance()
     if lock is None:
+        _signal_running_instance()
         print("rememory is already running -- look for the tray icon.", file=sys.stderr)
         return 0
 
     app = TrayApp()
+    # Serve the lock socket so a later launch can raise the dashboard.
+    threading.Thread(target=app.serve_open_requests, args=(lock,), daemon=True).start()
+    # Clicking the shortcut should show the dashboard. The tray icon alone
+    # looks like nothing happened -- especially now that the launcher is
+    # windowless and there is no console to hint that anything started.
+    # --tray-only exists for a future login-autostart, which should not steal
+    # focus with a window the user did not ask for.
+    if "--tray-only" not in sys.argv[1:]:
+        app.open_dashboard()
     # Heal a stopped database in the background so the tray comes up instantly.
     threading.Thread(
         target=lambda: __import__("memory_mcp.health", fromlist=["ensure_services"])

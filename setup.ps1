@@ -261,10 +261,12 @@ else {
 }
 
 # ---------------------------------------------------------------------------
-Step "First index + background automation"
-Info "indexing rememory itself (proves the whole pipeline end to end)..."
-& $Uv run -m indexer.cli index --project rememory
-if ($LASTEXITCODE -ne 0) { Fail "indexing failed." }
+Step "Background automation"
+# rememory deliberately does not index its own source. It exists to remember
+# YOUR projects; indexing the tool itself only lengthens setup and puts
+# rememory's internals into your search results. The end-to-end pipeline is
+# still proven -- by the round-trip test in the next step, which embeds,
+# upserts, searches and cleans up without touching this repo.
 Info "seeding example memories (skips quietly if already seeded)..."
 & $Uv run scripts/seed_memories.py
 Info "registering background tasks (sync every 30 min, backup daily 12:00)..."
@@ -272,13 +274,13 @@ schtasks /Create /TN "RememorySync" /TR "powershell.exe -NoProfile -WindowStyle 
 $syncOk = ($LASTEXITCODE -eq 0)
 schtasks /Create /TN "RememoryBackup" /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Root\scripts\backup.ps1`"" /SC DAILY /ST 12:00 /F | Out-Null
 if ($syncOk -and $LASTEXITCODE -eq 0) {
-    Ok "index built; RememorySync + RememoryBackup registered"
+    Ok "RememorySync + RememoryBackup registered"
 }
 else {
     # Non-fatal: some locked-down machines block Task Scheduler. rememory
     # still works -- the assistant's sync_index tool and manual `uv run -m
     # indexer.cli sync` cover freshness; only the automation is missing.
-    Ok "index built"
+    Ok "memories seeded"
     Write-Host "      [!] could not register scheduled tasks (blocked on this machine?)." -ForegroundColor Yellow
     Write-Host "      rememory still works; run 'uv run -m indexer.cli sync' occasionally," -ForegroundColor Yellow
     Write-Host "      or let the assistant call sync_index after it writes files." -ForegroundColor Yellow

@@ -9,16 +9,13 @@
 #   1. add an entry below (in projects.yaml)
 #   2. uv run -m indexer.cli index --project <name>
 
-projects:
-  # Rememory indexes itself so Claude can answer questions about how it works.
-  rememory:
-    root: .                    # relative paths resolve against this repo's root
-    description: >-
-      The rememory system itself: local development memory for Claude Code
-      (Qdrant + Ollama + MCP).
-    extra_ignore_dirs:
-      - data                   # Qdrant storage: binary, enormous, meaningless as text
-    include_only: []
+# Deliberately empty. rememory does NOT index itself: you installed it to
+# remember YOUR projects, and indexing the tool's own source only spends time
+# at setup and pollutes search results with rememory's internals. Register
+# real projects instead -- just ask your assistant to "create a knowledge base
+# for this project in rememory", or add an entry below by hand.
+
+projects: {}
 
   # my-app:
   #   root: C:\code\my-app     # absolute paths work anywhere

@@ -102,15 +102,15 @@ else
   ok "config/projects.yaml already exists -- keeping yours"
 fi
 
-step "First index + background automation"
-info "indexing rememory itself (proves the whole pipeline end to end)..."
-uv run -m indexer.cli index --project rememory || fail "indexing failed."
+step "Background automation"
+# rememory deliberately does not index its own source -- see setup.ps1 for the
+# reasoning. The round-trip test in the next step still proves the pipeline.
 info "seeding example memories (skips quietly if already seeded)..."
 uv run scripts/seed_memories.py || true
 info "background sync: cron is yours to configure on Unix -- suggested line:"
 info "  */30 * * * *  cd $ROOT && $(command -v uv) run -m indexer.cli sync"
 info "  0 12 * * *    cd $ROOT && $(command -v uv) run scripts/export_memory.py"
-ok "index built"
+ok "automation configured"
 
 step "Verifying the installation (test suite)"
 uv run tests/test_unit.py || fail "unit tests failed."
