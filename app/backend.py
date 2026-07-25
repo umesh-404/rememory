@@ -360,7 +360,7 @@ class Api:
                     data=json.dumps(payload).encode(),
                     headers={"Content-Type": "application/json"},
                 )
-                with urllib.request.urlopen(req, timeout=20):
+                with direct_urlopen(req, timeout=20):
                     pass
             except OSError:
                 continue
@@ -387,7 +387,7 @@ class Api:
                     data=json.dumps(payload).encode(),
                     headers={"Content-Type": "application/json"},
                 )
-                with urllib.request.urlopen(req, timeout=180):
+                with direct_urlopen(req, timeout=180):
                     pass
             except OSError:
                 continue
@@ -489,7 +489,7 @@ class Api:
             data=body, headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=4) as resp:
+            with direct_urlopen(req, timeout=4) as resp:
                 return json.load(resp).get("result", {}).get("count", 0)
         except (OSError, ValueError):
             return 0
@@ -508,7 +508,7 @@ class Api:
                 data=body, headers={"Content-Type": "application/json"},
             )
             try:
-                with urllib.request.urlopen(req, timeout=4) as resp:
+                with direct_urlopen(req, timeout=4) as resp:
                     pts = json.load(resp).get("result", {}).get("points", [])
                 for p in pts:
                     ts = (p.get("payload") or {}).get("indexed_at")
@@ -616,7 +616,7 @@ class Api:
                 data=body, headers={"Content-Type": "application/json"}, method="POST",
             )
             with contextlib.suppress(OSError):
-                urllib.request.urlopen(req, timeout=30).close()
+                direct_urlopen(req, timeout=30).close()
         return _ok(f"'{name}' removed. Its stored memories were kept.")
 
     # --------------------------------------------------------------- sync
@@ -689,7 +689,7 @@ class Api:
             data=body, headers={"Content-Type": "application/json"}, method="POST",
         )
         try:
-            urllib.request.urlopen(req, timeout=20).close()
+            direct_urlopen(req, timeout=20).close()
         except OSError as exc:
             return _err(f"Delete failed: {exc}")
         return _ok("Memory deleted.")

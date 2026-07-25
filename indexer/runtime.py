@@ -55,8 +55,10 @@ def _never_proxy_loopback() -> None:
 _never_proxy_loopback()
 
 
-def direct_urlopen(url: str, timeout: float = 6.0):
+def direct_urlopen(url, timeout: float = 6.0):
     """urlopen that never consults a proxy.
+
+    `url` is a str or a urllib.request.Request, exactly like urlopen.
 
     NO_PROXY is not sufficient on Windows on its own: urllib only applies the
     environment bypass list when the proxies themselves came from the
@@ -148,10 +150,12 @@ def port_is_ours(port: int) -> bool:
     escape crashed setup on exactly the machines this function exists to
     support -- the ones where something else already owns the port.
     """
-    import urllib.request
-
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/collections", timeout=2) as r:
+        # direct_urlopen, not urlopen: on a machine with a proxy configured,
+        # a proxied loopback request fails and setup would conclude the port
+        # is held by something foreign -- then move Qdrant to a new port on
+        # every single run.
+        with direct_urlopen(f"http://127.0.0.1:{port}/collections", timeout=3) as r:
             body = r.read(400).decode("utf-8", "replace")
         return '"collections"' in body
     except Exception:

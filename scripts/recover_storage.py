@@ -80,7 +80,12 @@ def qdrant_port() -> int:
     return 6333
 
 
-def wait_ready(port: int, seconds: int = 90) -> bool:
+def wait_ready(port: int, seconds: int = 60) -> bool:
+    """Wait for the port to accept connections, giving up after `seconds`.
+
+    Short on purpose: a Qdrant that is going to start does so in a few
+    seconds, so a long window only makes a failure slower to report.
+    """
     deadline = time.time() + seconds
     while time.time() < deadline:
         try:
@@ -112,6 +117,11 @@ def corrupt_collections_from_logs() -> set[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--yes", action="store_true", help="actually delete and restart")
+    parser.add_argument(
+        "--no-start",
+        action="store_true",
+        help="delete only; leave the container stopped for the caller to recreate",
+    )
     args = parser.parse_args()
 
     print("rememory storage recovery\n")
@@ -165,6 +175,13 @@ def main() -> int:
             print(f"  FAILED to delete {path}: {exc}")
             print("  Close anything holding those files (antivirus, Explorer) and retry.")
             return 1
+
+    if args.no_start:
+        # setup recreates the container itself with `docker compose up`, which
+        # is the only way to pick up a changed published port. Starting the old
+        # one here would just fail to bind and look like recovery had failed.
+        print("\n  Deleted. Leaving the container stopped for setup to recreate.")
+        return 0
 
     print("  starting the container...")
     started = docker("start", CONTAINER, timeout=90)

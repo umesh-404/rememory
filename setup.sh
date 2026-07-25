@@ -55,7 +55,7 @@ command -v docker >/dev/null || fail "Docker not found: https://docs.docker.com/
 docker info >/dev/null 2>&1 || fail "Docker daemon not running -- start Docker and re-run."
 ok "docker running"
 command -v ollama >/dev/null || fail "Ollama not found: https://ollama.com/download"
-curl -sf http://127.0.0.1:11434/api/tags >/dev/null || fail "Ollama not responding -- start it ('ollama serve' or the app) and re-run."
+curl -sf --noproxy '*' http://127.0.0.1:11434/api/tags >/dev/null || fail "Ollama not responding -- start it ('ollama serve' or the app) and re-run."
 ok "ollama running"
 
 step "Ensuring uv (Python toolchain manager)"
@@ -78,13 +78,54 @@ mkdir -p data/qdrant/storage data/qdrant/snapshots data/logs data/backups
 if ! docker compose -f docker/compose.yml up -d; then
   command -v docker-compose >/dev/null && docker-compose -f docker/compose.yml up -d || fail "docker compose failed."
 fi
-info "waiting for Qdrant to become ready..."
+# Read the chosen port rather than assuming 6333: config/runtime.json is
+# written when a machine has to move Qdrant off a busy port, and hardcoding
+# the default made this script probe the wrong port and declare a healthy
+# database dead. --noproxy matters for the same reason it does in Python:
+# curl honours http_proxy, and a proxied loopback request always fails.
+QPORT=6333
+if [ -f config/runtime.json ]; then
+  QPORT=$(sed -n 's/.*"qdrant_port"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' config/runtime.json | head -1)
+  [ -n "$QPORT" ] || QPORT=6333
+fi
+ready=""
+info "waiting for Qdrant to become ready (up to 60s)..."
 for i in $(seq 1 30); do
-  curl -sf http://127.0.0.1:6333/readyz >/dev/null && break
+  if curl -sf --noproxy '*' "http://127.0.0.1:$QPORT/readyz" >/dev/null; then ready=1; break; fi
+  # A container that has already stopped is never going to answer.
+  if [ "$i" -ge 3 ]; then
+    state=$(docker inspect -f '{{.State.Status}}' rememory-qdrant 2>/dev/null || echo unknown)
+    case "$state" in running|created) ;; *) break ;; esac
+  fi
   sleep 2
 done
-curl -sf http://127.0.0.1:6333/readyz >/dev/null || fail "Qdrant not ready: docker logs rememory-qdrant"
-ok "qdrant ready on 127.0.0.1:6333 (loopback only -- unreachable from the network)"
+if [ -z "$ready" ]; then
+  echo ""
+  printf '\033[33m      Qdrant did not answer. Container state and last log lines:\033[0m\n'
+  docker inspect -f '      state={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' rememory-qdrant || true
+  docker logs --tail 25 rememory-qdrant 2>&1 || true
+  echo ""
+  logs=$(docker logs --tail 400 rememory-qdrant 2>&1 || true)
+  case "$logs" in
+    *"Failed to load local shard"*)
+      case "$logs" in
+        *storage/collections/memory/*)
+          echo "      The 'memory' collection is corrupt and cannot be rebuilt by"
+          echo "      re-indexing. Restore it with:  uv run scripts/import_memory.py"
+          fail "Qdrant cannot start: the memory collection is damaged."
+          ;;
+      esac
+      printf '\033[36m      Corrupt index data in a rebuildable collection -- recovering...\033[0m\n'
+      uv run --no-project scripts/recover_storage.py --yes || true
+      for i in $(seq 1 30); do
+        if curl -sf --noproxy '*' "http://127.0.0.1:$QPORT/readyz" >/dev/null; then ready=1; break; fi
+        sleep 2
+      done
+      ;;
+  esac
+fi
+[ -n "$ready" ] || fail "Qdrant did not become ready -- the container output above says why."
+ok "qdrant ready on 127.0.0.1:$QPORT (loopback only -- unreachable from the network)"
 
 step "Building the Python environment (uv sync -- pinned Python 3.12, locked deps)"
 uv sync || fail "uv sync failed."

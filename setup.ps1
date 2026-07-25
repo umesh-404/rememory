@@ -201,6 +201,23 @@ Ok "reranker model ready (Qwen3-Reranker-0.6B)"
 
 # ---------------------------------------------------------------------------
 Step "Choosing ports (avoids clashes with anything already running)"
+# Remove any existing rememory-qdrant container BEFORE picking ports.
+#
+# The container is disposable -- every byte of data lives in the bind-mounted
+# data\qdrant directory and in config, so removing it loses nothing and
+# `docker compose up` recreates it in seconds. Doing this first fixes two
+# failures that compound each other:
+#
+#   * A container left behind by a failed run still holds its published port,
+#     so `docker compose up` dies with "port is already allocated".
+#   * That stale container is usually crash-looping, so it never answers
+#     port_is_ours(), setup concludes something foreign owns the port, and
+#     moves Qdrant to a new one. Every re-run shifted it again -- 6333, 6335,
+#     6337 -- while each abandoned container kept squatting its old port.
+#
+# Clearing it first makes the port choice deterministic: the default is free
+# again, so re-running setup converges on 6333 instead of drifting upward.
+Invoke-Quiet { docker rm -f rememory-qdrant }
 $portJson = & $Uv run --directory $Root python -c @"
 import json,sys
 sys.path.insert(0, r'$Root')
@@ -228,17 +245,28 @@ Step "Starting the vector database (Qdrant in Docker, data stays in $Root\data)"
 New-Item -ItemType Directory -Force "$Root\data\qdrant\storage", "$Root\data\qdrant\snapshots", "$Root\data\logs", "$Root\data\backups" | Out-Null
 # `docker compose` (plugin) with `docker-compose` (standalone) as fallback --
 # older Docker installs only have the hyphenated binary.
-docker compose -f "$Root\docker\compose.yml" up -d
-if ($LASTEXITCODE -ne 0) {
-    if (Get-Command docker-compose -ErrorAction SilentlyContinue) {
-        Info "falling back to docker-compose..."
-        docker-compose -f "$Root\docker\compose.yml" up -d
-    }
-    if ($LASTEXITCODE -ne 0) { Fail "docker compose failed -- see output above." }
+# Decide UP FRONT whether the compose plugin exists, rather than treating any
+# failure as "plugin missing". Falling back on a real error (a port clash, say)
+# ran the standalone binary against the same broken state, which then reused
+# the existing container and reported success -- hiding the actual problem.
+Invoke-Quiet { docker compose version }
+$hasComposePlugin = ($LASTEXITCODE -eq 0)
+if ($hasComposePlugin) {
+    docker compose -f "$Root\docker\compose.yml" up -d
+} elseif (Get-Command docker-compose -ErrorAction SilentlyContinue) {
+    Info "using standalone docker-compose (the compose plugin is not installed)..."
+    docker-compose -f "$Root\docker\compose.yml" up -d
+} else {
+    Fail "Neither 'docker compose' nor 'docker-compose' is available. Update Docker Desktop."
 }
-Info "waiting for Qdrant to become ready (up to 2 minutes on a first run)..."
+if ($LASTEXITCODE -ne 0) { Fail "Starting the database container failed -- see the error above." }
+Info "waiting for Qdrant to become ready (up to 60s)..."
 $ready = $false
-foreach ($i in 1..60) {
+# 30 x 2s. A healthy Qdrant answers in a few seconds even on a cold first
+# start; anything longer is a fault, and the loop below breaks out early the
+# moment the container stops being 'running', so a crash loop is caught in
+# about six seconds rather than at the end of the window.
+foreach ($i in 1..30) {
     if (Test-QdrantReady $ports.http) { $ready = $true; break }
     # A container that has already exited is never going to answer -- stop
     # waiting the full two minutes and go straight to showing why.
@@ -271,9 +299,16 @@ if (-not $ready) {
         Write-Host "      Recovering automatically (your memories are not touched)..." -ForegroundColor Cyan
         # --no-project: this runs BEFORE `uv sync` creates the virtualenv, and
         # the script is stdlib-only precisely so it needs nothing built.
-        & $Uv run --no-project scripts/recover_storage.py --yes
+        # --no-start: we recreate the container below with compose, which is
+        # the only way to publish the port this run actually chose.
+        & $Uv run --no-project scripts/recover_storage.py --yes --no-start
         if ($LASTEXITCODE -eq 0) {
-            foreach ($i in 1..45) {
+            Invoke-Quiet { docker rm -f rememory-qdrant }
+            docker compose -f "$Root\docker\compose.yml" up -d
+            if ($LASTEXITCODE -ne 0 -and (Get-Command docker-compose -ErrorAction SilentlyContinue)) {
+                docker-compose -f "$Root\docker\compose.yml" up -d
+            }
+            foreach ($i in 1..30) {   # 60s, same reasoning as the first wait
                 if (Test-QdrantReady $ports.http) { $ready = $true; break }
                 Start-Sleep 2
             }
