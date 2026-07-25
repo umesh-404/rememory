@@ -159,6 +159,63 @@ $("#btnSyncAll").addEventListener("click", async () => {
 
 $("#btnBackup").addEventListener("click", () => act("backup_now", [], "Backing up memories…"));
 
+/* ──────────────────────────── diagnostics ─────────────────────────── */
+
+function showReport(title, subtitle, body, bad) {
+  $("#reportTitle").textContent = title;
+  const sub = $("#reportSubtitle");
+  sub.textContent = subtitle;
+  sub.className = bad ? "bad-text" : "muted";
+  $("#reportBody").textContent = body;
+  $("#reportModal").classList.remove("hidden");
+  $("#btnCloseReport").focus();
+}
+
+function hideReport() { $("#reportModal").classList.add("hidden"); }
+
+$("#btnCloseReport").addEventListener("click", hideReport);
+$("#reportModal").addEventListener("click", (e) => {
+  if (e.target.id === "reportModal") hideReport();   // click outside to dismiss
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#reportModal").classList.contains("hidden")) hideReport();
+});
+
+$("#btnCopyReport").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("#reportBody").textContent);
+    toast("Report copied.", "ok");
+  } catch {
+    // Clipboard access can be refused in an embedded webview; selecting the
+    // text by hand still works, so say that instead of failing silently.
+    toast("Could not copy — select the text and press Ctrl+C.", "bad");
+  }
+});
+
+$("#btnDiagnose").addEventListener("click", async () => {
+  if (!api) { toast("Still connecting to rememory…", "bad"); return; }
+  busy(true, "Checking Docker, database and models…");
+  try {
+    const res = await api.diagnose();
+    if (!res || !res.ok) {
+      toast((res && res.message) || "Could not run diagnostics.", "bad");
+      return;
+    }
+    showReport(
+      res.problems ? "Diagnostics — problems found" : "Diagnostics — all clear",
+      res.problems
+        ? "See the numbered verdict at the bottom."
+        : "Every service answered normally.",
+      res.report,
+      res.problems,
+    );
+  } catch (err) {
+    toast(`Something went wrong: ${err}`, "bad");
+  } finally {
+    busy(false);
+  }
+});
+
 $("#btnRepair").addEventListener("click", async () => {
   if (!confirm("Repair re-verifies and rebuilds every component.\n\n"
     + "Your memories, index and settings are NOT touched, and a safety backup "

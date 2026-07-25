@@ -137,6 +137,9 @@
             <button class="btn" id="btnCheckUpdate">
               <svg class="ico" viewBox="0 0 24 24"><path d="M12 21V9M7 14l5-5 5 5M4 3h16"/></svg>Check for updates
             </button>
+            <button class="btn" id="btnDiagnose">
+              <svg class="ico" viewBox="0 0 24 24"><path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4"/></svg>Diagnose
+            </button>
             <button class="btn btn-warn" id="btnRepair">
               <svg class="ico" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 1 5 5L9 22l-5-5z"/><path d="M18 2l4 4"/></svg>Repair
             </button>
@@ -277,6 +280,25 @@
 
   <div id="toasts" class="toasts"></div>
   <div id="overlay" class="overlay hidden"><div class="spinner"></div><span id="overlayText">Working…</span></div>
+
+  <div id="reportModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="reportTitle">
+    <div class="modal-box">
+      <div class="modal-head">
+        <div>
+          <h2 id="reportTitle">Diagnostics</h2>
+          <span class="muted" id="reportSubtitle">Checking your services…</span>
+        </div>
+        <button class="icon-btn" id="btnCloseReport" aria-label="Close">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <pre id="reportBody" class="report"></pre>
+      <div class="modal-foot">
+        <span class="muted">Nothing was changed. Safe to run any time.</span>
+        <button class="btn btn-sm" id="btnCopyReport">Copy report</button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

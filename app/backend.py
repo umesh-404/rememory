@@ -740,6 +740,32 @@ class Api:
         self.restart_app()
         return _ok("Updated. Restarting the app...")
 
+    def diagnose(self) -> dict:
+        """Run scripts/diagnose.py and hand its report back to the UI.
+
+        Deliberately shells out to the script rather than importing it: the
+        script is stdlib-only and independent of the package precisely so it
+        still works when the environment is broken, and running it the same
+        way the docs tell users to run it means the button and the command
+        can never drift apart.
+        """
+        script = ROOT / "scripts" / "diagnose.py"
+        if not script.exists():
+            return _err("diagnose.py is missing -- re-run setup to restore it.")
+        r = _run([_app_launcher()[0], str(script)], timeout=180)
+        if r is None:
+            return _err("The diagnostic did not finish in time.")
+        report = (r.stdout or "").strip() or (r.stderr or "").strip()
+        if not report:
+            return _err("The diagnostic produced no output.")
+        # returncode 1 means "problems found", which is a successful run of a
+        # diagnostic -- the UI decides how to colour it from `problems`.
+        return _ok(
+            "No problems found." if r.returncode == 0 else "Problems found.",
+            report=report,
+            problems=r.returncode != 0,
+        )
+
     def restart_app(self) -> dict:
         """Relaunch the tray app detached, then exit this process tree."""
         try:
