@@ -31,6 +31,23 @@ function Fail([string]$msg) {
     exit 1
 }
 
+# Run a native command, discard ALL of its output, keep only $LASTEXITCODE.
+#
+# Why this exists: in Windows PowerShell 5.1, redirecting a native exe's stderr
+# wraps every stderr line in an ErrorRecord (NativeCommandError). With
+# $ErrorActionPreference = 'Stop' that turns a purely informational message into
+# a fatal error -- e.g. Docker Desktop on some machines prints
+# "WARNING: No blkio throttle.read_bps_device support" from `docker info`, which
+# killed setup at step 1 even though Docker was running perfectly.
+# Dropping to 'Continue' for the duration makes the wrapped stderr harmless;
+# the exit code, which is what we actually test, is unaffected.
+function Invoke-Quiet([scriptblock]$Command) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Command 2>&1 | Out-Null }
+    finally { $ErrorActionPreference = $prev }
+}
+
 Write-Host "rememory setup -- local, private development memory (Qdrant + Ollama + MCP)"
 Write-Host "Everything runs on this machine. Nothing is sent anywhere."
 
@@ -39,7 +56,7 @@ Step "Checking prerequisites (Docker, Ollama)"
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Fail "Docker not found. Install Docker Desktop: https://docs.docker.com/desktop/setup/install/windows-install/"
 }
-docker info 2>$null | Out-Null
+Invoke-Quiet { docker info }
 if ($LASTEXITCODE -ne 0) { Fail "Docker daemon is not running. Start Docker Desktop, wait for it to say 'running', then re-run." }
 Ok "docker running"
 if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
@@ -203,7 +220,7 @@ if (Test-Path $legacy) { Remove-Item $legacy -Recurse -Force -ErrorAction Silent
 # A real icon, generated from the same code that draws the tray icon --
 # otherwise the shortcut inherits uv.exe's icon.
 $IconPath = Join-Path (Join-Path $Root "data") "rememory.ico"
-& $Uv run --extra app --directory $Root python -c "from app.icon import write_ico; write_ico(r'$IconPath')" 2>$null | Out-Null
+Invoke-Quiet { & $Uv run --extra app --directory $Root python -c "from app.icon import write_ico; write_ico(r'$IconPath')" }
 
 $Shell = New-Object -ComObject WScript.Shell
 $lnk = $Shell.CreateShortcut((Join-Path $MenuDir "rememory.lnk"))

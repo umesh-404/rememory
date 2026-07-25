@@ -20,8 +20,16 @@ catch {
 }
 
 try {
-    $out = & $Uv run --directory $Root scripts/export_memory.py 2>&1 |
-        Where-Object { $_ -match 'exported|pruned' }
+    # See sync.ps1: redirected native stderr becomes a terminating error under
+    # $ErrorActionPreference = 'Stop' in PowerShell 5.1.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $Uv run --directory $Root scripts/export_memory.py 2>&1 |
+            Where-Object { $_ -match 'exported|pruned' }
+    }
+    finally { $ErrorActionPreference = $prev }
+    if ($LASTEXITCODE -ne 0) { throw "export_memory.py exited $LASTEXITCODE" }
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $($out -join ' | ')" |
         Add-Content $Log -Encoding utf8
 }

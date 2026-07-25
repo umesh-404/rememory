@@ -30,7 +30,14 @@ catch {
 }
 
 try {
-    $out = & $Uv run --directory $Root -m indexer.cli sync 2>&1
+    # 'Continue' while the native command runs: PowerShell 5.1 wraps a native
+    # exe's stderr lines in ErrorRecords when redirected, and under 'Stop' a
+    # harmless progress line from uv would be reported as a failed sync.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = & $Uv run --directory $Root -m indexer.cli sync 2>&1 }
+    finally { $ErrorActionPreference = $prev }
+    if ($LASTEXITCODE -ne 0) { throw "indexer.cli sync exited $LASTEXITCODE" }
     $summary = ($out | Where-Object { $_ -match 'files ->|seen=' }) -join ' | '
     Write-Log "ok: $summary"
 }
