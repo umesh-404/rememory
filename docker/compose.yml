@@ -7,11 +7,27 @@
 #    the engine under your data on any `docker compose pull`. Upgrades should be
 #    a deliberate, backed-up act. Bump this line on purpose, never by accident.
 #
-# 2. Bind mount to D:\ instead of a Docker named volume.
+# 2. Bind mount instead of a Docker named volume.
 #    On Windows, Docker Desktop named volumes live inside the WSL2 virtual disk
-#    (docker_data.vhdx), which sits on C: — and C: has ~23 GB free. A bind mount
-#    puts the vectors on D: where there is room, and makes them plainly visible
-#    and backup-able as ordinary files.
+#    (docker_data.vhdx), which sits on C: — and C: is where space is scarce. A
+#    bind mount puts the vectors on the drive with room, and makes them plainly
+#    visible and backup-able as ordinary files.
+#
+#    KNOWN COST, accepted deliberately: Docker Desktop translates Windows paths
+#    through a filesystem layer that does not provide the write ordering and
+#    mmap semantics Qdrant's on-disk index expects. Qdrant says so at startup:
+#    "Unrecognized filesystem - cannot guarantee data safety". If the machine
+#    loses power, or Docker/WSL2 is killed mid-write, an index can be left torn
+#    and Qdrant will then panic on load and restart forever.
+#
+#    This is survivable because of how the collections are partitioned:
+#      * code and docs are DERIVED — scripts/recover_storage.py deletes them
+#        and re-indexing rebuilds them exactly. setup runs it automatically.
+#      * memory is NOT derived — it is protected by the daily JSON export
+#        (scripts/export_memory.py), restorable with import_memory.py. That
+#        export is the real durability guarantee, not the filesystem.
+#    If you have room on C:, a named volume is the safer choice: replace the
+#    storage line below with a named volume and re-import your memories.
 #
 # 3. Ports published to 127.0.0.1 only.
 #    Qdrant runs with no authentication by default. Binding to the loopback
