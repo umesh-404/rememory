@@ -309,16 +309,37 @@ if (Test-Path $legacy) { Remove-Item $legacy -Recurse -Force -ErrorAction Silent
 $IconPath = Join-Path (Join-Path $Root "data") "rememory.ico"
 Invoke-Quiet { & $Uv run --extra app --directory $Root python -c "from app.icon import write_ico; write_ico(r'$IconPath')" }
 
+# Launch through the venv's pythonw.exe, NOT uv.exe.
+#
+# uv.exe is a console-subsystem program, so Windows creates a console window
+# for it no matter what. WindowStyle=7 only minimises that console -- it still
+# exists, and it can surface as a black window titled "rememory" that looks
+# like a broken dashboard. Worse, if the user clicks in it, Windows console
+# QuickEdit puts it in selection mode (the title becomes "Select rememory")
+# and the app freezes the moment it next writes to stdout.
+#
+# pythonw.exe is a GUI-subsystem binary: no console is ever created, so none
+# of that can happen. The venv already exists by this step, and skipping
+# `uv run` also makes the app start noticeably faster.
+$Pythonw = Join-Path $Root ".venv\Scripts\pythonw.exe"
 $Shell = New-Object -ComObject WScript.Shell
 $lnk = $Shell.CreateShortcut((Join-Path $MenuDir "rememory.lnk"))
-$lnk.TargetPath = $Uv
-$lnk.Arguments = "run --extra app --directory `"$Root`" -m app.main"
+if (Test-Path $Pythonw) {
+    $lnk.TargetPath = $Pythonw
+    $lnk.Arguments = "-m app.main"
+} else {
+    # Desktop extra unavailable or venv missing: fall back to uv so the
+    # shortcut still does something sensible.
+    $lnk.TargetPath = $Uv
+    $lnk.Arguments = "run --extra app --directory `"$Root`" -m app.main"
+}
 $lnk.WorkingDirectory = $Root
 $lnk.WindowStyle = 7
 $lnk.Description = "rememory - local memory for AI coding assistants"
 if (Test-Path $IconPath) { $lnk.IconLocation = $IconPath }
 $lnk.Save()
-Ok "Start-menu shortcut created (search: rememory)"
+if (Test-Path $Pythonw) { Ok "Start-menu shortcut created (search: rememory)" }
+else { Ok "Start-menu shortcut created (via uv -- desktop extra was not installed)" }
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "Setup complete." -ForegroundColor Green

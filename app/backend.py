@@ -77,6 +77,26 @@ def _uv() -> str:
     return "uv"
 
 
+def _app_launcher() -> list[str]:
+    """Command prefix that starts the GUI app WITHOUT a console window.
+
+    On Windows this must be pythonw.exe. uv.exe is a console-subsystem
+    program, so launching through `uv run` always creates a console; it shows
+    up as a black window titled "rememory" that looks like a broken dashboard,
+    and if the user clicks in it, console QuickEdit selection mode freezes the
+    app at its next write to stdout.
+    """
+    if IS_WINDOWS:
+        pythonw = ROOT / ".venv/Scripts/pythonw.exe"
+        if pythonw.exists():
+            return [str(pythonw)]
+        return [_uv(), "run", "--extra", "app", "--directory", str(ROOT)]
+    venv_python = ROOT / ".venv/bin/python"
+    if venv_python.exists():
+        return [str(venv_python)]
+    return [_uv(), "run", "--extra", "app", "--directory", str(ROOT)]
+
+
 def _ok(message: str, **extra) -> dict:
     return {"ok": True, "message": message, **extra}
 
@@ -643,7 +663,7 @@ class Api:
         """Relaunch the tray app detached, then exit this process tree."""
         try:
             subprocess.Popen(
-                [_uv(), "run", "--extra", "app", "--directory", str(ROOT), "-m", "app.main"],
+                [*_app_launcher(), "-m", "app.main"],
                 cwd=str(ROOT), **_NO_WINDOW,
             )
         except OSError as exc:

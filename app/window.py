@@ -12,13 +12,39 @@ Launched by the tray as:  python -m app.window
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 
 
+def _apply_safe_mode() -> bool:
+    """Optionally force WebView2 to render without the GPU.
+
+    A handful of GPU/driver combinations paint nothing at all: the page loads,
+    the layout is correct and fully measurable from JavaScript, but the window
+    stays blank. Software rendering sidesteps it at the cost of some smoothness,
+    which beats an invisible dashboard.
+
+    This is opt-in via REMEMORY_UI_SAFE_MODE=1 rather than always-on, because
+    the fault is rare and disabling the GPU for everyone would be a poor trade.
+    The variable must be set before pywebview is imported -- WebView2 reads its
+    browser arguments once, when it creates its environment.
+    """
+    if os.environ.get("REMEMORY_UI_SAFE_MODE") != "1":
+        return False
+    existing = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+    flags = "--disable-gpu --disable-gpu-compositing --disable-software-rasterizer"
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"{existing} {flags}".strip()
+    return True
+
+
 def main() -> int:
+    safe_mode = _apply_safe_mode()
+    if safe_mode:
+        print("UI safe mode: GPU rendering disabled.", file=sys.stderr)
+
     try:
         import webview
     except ImportError:
