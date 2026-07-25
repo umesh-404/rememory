@@ -28,6 +28,28 @@ fail() {
 echo "rememory setup -- local, private development memory (Qdrant + Ollama + MCP)"
 echo "Everything runs on this machine. Nothing is sent anywhere."
 
+# Refuse to install inside a cloud-synced folder. `uv sync` writes tens of
+# thousands of small files into .venv and some dependencies compile from
+# source; a sync client intercepts every write, so the install does not fail,
+# it crawls and looks hung. Qdrant's storage is memory-mapped and is actively
+# corrupted by a sync client copying it mid-write.
+case "$ROOT" in
+  */OneDrive/*|*/Dropbox/*|*/"Google Drive"/*|*/GoogleDrive/*|*/"Library/Mobile Documents"/*)
+    if [ "${REMEMORY_ALLOW_CLOUD_FOLDER:-0}" != "1" ]; then
+      printf '\n\033[31mCANNOT INSTALL HERE -- this folder is synced to the cloud\n  %s\033[0m\n\n' "$ROOT"
+      echo "  Installing here makes setup crawl to a near-halt and risks corrupting"
+      echo "  the vector database, which is memory-mapped and must not be synced."
+      echo ""
+      echo "  Move this folder somewhere local and re-run, for example ~/rememory"
+      echo "  (delete any partly-built .venv first)."
+      echo ""
+      echo "  To install here anyway: REMEMORY_ALLOW_CLOUD_FOLDER=1 ./setup.sh"
+      exit 1
+    fi
+    printf '\033[33m  WARNING: installing into a synced folder -- expect a slow install.\033[0m\n'
+    ;;
+esac
+
 step "Checking prerequisites (Docker, Ollama)"
 command -v docker >/dev/null || fail "Docker not found: https://docs.docker.com/engine/install/"
 docker info >/dev/null 2>&1 || fail "Docker daemon not running -- start Docker and re-run."

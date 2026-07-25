@@ -9,6 +9,10 @@
 # your machine's real paths filled in.
 #
 # Idempotent: safe to re-run at any time; completed steps are fast no-ops.
+#
+#     -AllowCloudFolder   install into a OneDrive/Dropbox/Drive folder anyway
+
+param([switch]$AllowCloudFolder)
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
@@ -41,6 +45,24 @@ function Fail([string]$msg) {
 # killed setup at step 1 even though Docker was running perfectly.
 # Dropping to 'Continue' for the duration makes the wrapped stderr harmless;
 # the exit code, which is what we actually test, is unaffected.
+# Run a native command but give up after $TimeoutSec, killing it and its
+# children. Used for steps that are optional: a dependency that compiles from
+# source can stall on a slow disk or a wedged network, and an optional extra
+# must never be able to hold the whole installer hostage.
+# Returns the exit code, or -1 if it timed out.
+function Invoke-WithTimeout([string]$File, [string[]]$Arguments, [int]$TimeoutSec) {
+    $p = Start-Process -FilePath $File -ArgumentList $Arguments -NoNewWindow -PassThru
+    # Touching .Handle forces PowerShell to cache the process handle. Without
+    # this, .ExitCode reads back empty once the process has exited, and a
+    # successful install would be misreported as a failed one.
+    $null = $p.Handle
+    if ($p.WaitForExit($TimeoutSec * 1000)) { return $p.ExitCode }
+    # taskkill /T reaches the child build processes uv spawned, which a plain
+    # Stop-Process on the parent would orphan.
+    Invoke-Quiet { taskkill /PID $p.Id /T /F }
+    return -1
+}
+
 function Invoke-Quiet([scriptblock]$Command) {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -50,6 +72,61 @@ function Invoke-Quiet([scriptblock]$Command) {
 
 Write-Host "rememory setup -- local, private development memory (Qdrant + Ollama + MCP)"
 Write-Host "Everything runs on this machine. Nothing is sent anywhere."
+
+# ---------------------------------------------------------------------------
+# Refuse to install inside a cloud-synced folder.
+#
+# `uv sync` writes tens of thousands of small files into .venv, and some
+# dependencies (proxy-tools, required by the desktop app's pywebview) ship
+# only as a source archive, so they compile locally in a throwaway build
+# environment. A file-sync client intercepts every one of those writes to
+# upload it. The install does not fail -- it crawls, appearing to hang
+# forever on whichever package it happened to reach.
+#
+# The database and index are also unsafe to sync: Qdrant memory-maps its
+# storage, and a sync client copying those files mid-write corrupts them.
+$cloudRoots = @()
+foreach ($var in 'OneDrive', 'OneDriveConsumer', 'OneDriveCommercial') {
+    $val = [Environment]::GetEnvironmentVariable($var)
+    if ($val) { $cloudRoots += $val }
+}
+$cloudNames = 'OneDrive', 'Dropbox', 'Google Drive', 'GoogleDrive', 'iCloudDrive', 'Creative Cloud Files'
+$syncedBy = $null
+foreach ($c in $cloudRoots) {
+    if ($Root.StartsWith($c, [StringComparison]::OrdinalIgnoreCase)) { $syncedBy = $c; break }
+}
+if (-not $syncedBy) {
+    foreach ($n in $cloudNames) {
+        if ($Root -like "*\$n\*" -or $Root -like "*\$n") { $syncedBy = $n; break }
+    }
+}
+if ($syncedBy -and -not $AllowCloudFolder) {
+    Write-Host ""
+    Write-Host "CANNOT INSTALL HERE -- this folder is synced to the cloud" -ForegroundColor Red
+    Write-Host "  $Root" -ForegroundColor Red
+    Write-Host "  (matched: $syncedBy)"
+    Write-Host ""
+    Write-Host "  Installing here makes setup crawl to a near-halt, because every file"
+    Write-Host "  written into .venv gets uploaded, and it risks corrupting the vector"
+    Write-Host "  database, which is memory-mapped and must not be synced."
+    Write-Host ""
+    Write-Host "  Move this folder somewhere local and re-run, for example:" -ForegroundColor Cyan
+    Write-Host "      C:\rememory"
+    Write-Host ""
+    Write-Host "  If setup is running right now, press Ctrl+C first, then delete the"
+    Write-Host "  partly-built .venv folder before moving it."
+    Write-Host ""
+    Write-Host "  To install here anyway (not recommended):"
+    Write-Host "      powershell -ExecutionPolicy Bypass -File setup.ps1 -AllowCloudFolder"
+    exit 1
+}
+if ($syncedBy) {
+    Write-Host "  WARNING: installing into a synced folder ($syncedBy) -- expect a slow install." -ForegroundColor Yellow
+}
+if ($Root -match '\s') {
+    Write-Host "  NOTE: this path contains spaces; that is supported, but a path without" -ForegroundColor Yellow
+    Write-Host "        them (C:\rememory) avoids quoting problems in some MCP clients." -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------------------
 Step "Checking prerequisites (Docker, Ollama)"
@@ -153,9 +230,19 @@ Step "Building the Python environment (uv sync -- pinned Python 3.12, locked dep
 if ($LASTEXITCODE -ne 0) { Fail "uv sync failed." }
 # The desktop app (tray + dashboard) is an optional extra: if its GUI
 # dependencies fail on this machine, the core system must still install.
-& $Uv sync --extra app
-if ($LASTEXITCODE -eq 0) { Ok "environment ready (including the desktop app)" }
-else { Ok "environment ready (desktop app extra unavailable -- CLI and MCP work fine)" }
+# It is also the slowest thing here -- pywebview pulls in proxy-tools, which
+# is source-only and has to compile -- so it gets a hard time limit rather
+# than being allowed to stall the installer indefinitely.
+Info "adding the optional desktop app (compiles one small package; up to 10 min)..."
+$appCode = Invoke-WithTimeout $Uv @('sync', '--extra', 'app') 600
+if ($appCode -eq 0) {
+    Ok "environment ready (including the desktop app)"
+} elseif ($appCode -eq -1) {
+    Ok "environment ready (desktop app timed out and was skipped -- CLI and MCP work fine)"
+    Info "retry it later with:  uv sync --extra app"
+} else {
+    Ok "environment ready (desktop app extra unavailable -- CLI and MCP work fine)"
+}
 
 # ---------------------------------------------------------------------------
 Step "Creating vector collections (code / docs / memory)"

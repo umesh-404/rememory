@@ -119,6 +119,13 @@ Make sure Docker and Ollama are **running** before setup.
 
 ### 2. Clone and run the master setup
 
+Clone it to a **local, non-synced folder** — `C:\rememory`, `~/rememory`, or
+anywhere on a second drive. Do *not* clone into OneDrive, Dropbox, or Google
+Drive: the install writes tens of thousands of files into `.venv`, which a sync
+client uploads one by one until setup appears to hang, and the vector database
+is memory-mapped, so syncing it mid-write corrupts it. Setup refuses to run
+from a synced folder and tells you so.
+
 ```bash
 git clone https://github.com/umesh-404/rememory
 cd rememory
