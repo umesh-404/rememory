@@ -26,6 +26,53 @@ from pathlib import Path
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 RUNTIME_FILE = CONFIG_DIR / "runtime.json"
 
+
+def _never_proxy_loopback() -> None:
+    """Make sure nothing tries to reach our own services through a proxy.
+
+    Everything rememory talks to is on 127.0.0.1, so a proxy is never correct
+    here -- but both urllib and httpx (which qdrant-client uses) pick up
+    proxy settings from the environment, and on Windows urllib also reads the
+    system WinINET configuration. On a machine with a corporate proxy or a
+    VPN client configured, requests to our own loopback ports get handed to
+    that proxy and fail. The database is running and healthy; it just looks
+    permanently unreachable.
+
+    Extending NO_PROXY (rather than clearing the proxy variables) fixes it
+    without touching how anything else on the machine reaches the internet.
+    """
+    existing = os.environ.get("NO_PROXY", "") or os.environ.get("no_proxy", "")
+    entries = [e.strip() for e in existing.split(",") if e.strip()]
+    for host in ("127.0.0.1", "localhost", "::1"):
+        if host not in entries:
+            entries.append(host)
+    value = ",".join(entries)
+    # Both spellings: httpx reads the lowercase one, urllib checks either.
+    os.environ["NO_PROXY"] = value
+    os.environ["no_proxy"] = value
+
+
+_never_proxy_loopback()
+
+
+def direct_urlopen(url: str, timeout: float = 6.0):
+    """urlopen that never consults a proxy.
+
+    NO_PROXY is not sufficient on Windows on its own: urllib only applies the
+    environment bypass list when the proxies themselves came from the
+    environment. When they come from the system (registry) configuration it
+    uses the registry's own bypass rules instead and ignores NO_PROXY. An
+    opener built with an empty ProxyHandler has no proxies to consult at all,
+    which is the only reliable way to guarantee a direct loopback connection.
+
+    Caller handles exceptions, exactly as with urllib.request.urlopen.
+    """
+    import urllib.request
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(url, timeout=timeout)
+
+
 DEFAULTS = {
     "qdrant_port": 6333,
     "qdrant_grpc_port": 6334,

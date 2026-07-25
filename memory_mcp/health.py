@@ -23,9 +23,8 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
-import urllib.request
 
-from indexer.runtime import compose_env, qdrant_url
+from indexer.runtime import compose_env, direct_urlopen, qdrant_url
 
 QDRANT_READY = f"{qdrant_url()}/readyz"
 CONTAINER = "rememory-qdrant"
@@ -42,7 +41,7 @@ def _qdrant_up(timeout: float = 6.0) -> bool:
     a healthy database look offline.
     """
     try:
-        with urllib.request.urlopen(QDRANT_READY, timeout=timeout):
+        with direct_urlopen(QDRANT_READY, timeout=timeout):
             return True
     except OSError:
         return False

@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from indexer.runtime import compose_env, ollama_url, qdrant_url
+from indexer.runtime import compose_env, direct_urlopen, ollama_url, qdrant_url
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -62,7 +62,7 @@ def _get_json(url: str, timeout: float = 6.0):
     dashboard's Docker and Database cards flicker between states.
     """
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with direct_urlopen(url, timeout=timeout) as resp:
             return json.load(resp)
     except (OSError, urllib.error.URLError, ValueError):
         return None

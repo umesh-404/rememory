@@ -90,9 +90,17 @@ def tcp_open(port: int, timeout: float = 5.0) -> tuple[bool, str]:
 
 
 def http_get(url: str, timeout: float = 15.0) -> tuple[bool, str]:
+    """GET with proxies explicitly disabled.
+
+    An empty ProxyHandler is the only reliable way to guarantee a direct
+    loopback connection: on Windows, urllib honours NO_PROXY only when the
+    proxy settings themselves came from the environment, and falls back to the
+    system configuration's own bypass rules otherwise.
+    """
     start = time.time()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with opener.open(url, timeout=timeout) as resp:
             resp.read(200)
             return True, f"HTTP {resp.status} in {time.time() - start:.2f}s"
     except urllib.error.HTTPError as exc:
@@ -110,6 +118,48 @@ def main() -> int:
     say("runtime.json", "present" if RUNTIME_FILE.exists() else "absent (using defaults)")
     say("qdrant port", str(qdrant_port))
     say("ollama port", str(ollama_port))
+
+    head("Proxy settings")
+    # A proxy is never correct for 127.0.0.1, but urllib and httpx both pick
+    # these up, and on Windows urllib also reads the system configuration.
+    # A machine with a proxy set can have a healthy database that every client
+    # reports as unreachable, which is worth naming explicitly.
+    proxy_vars = {
+        k: v for k, v in os.environ.items()
+        if k.upper() in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") and v
+    }
+    for k, v in proxy_vars.items():
+        say(k, v)
+    no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    say("NO_PROXY", no_proxy or "(unset)")
+    system_proxy = ""
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            )
+            enabled = winreg.QueryValueEx(key, "ProxyEnable")[0]
+            if enabled:
+                system_proxy = str(winreg.QueryValueEx(key, "ProxyServer")[0])
+            key.Close()
+        except OSError:
+            pass
+    say("system proxy", system_proxy or "(none)")
+    if (proxy_vars or system_proxy) and not all(
+        h in no_proxy for h in ("127.0.0.1", "localhost")
+    ):
+        problems.append(
+            "A proxy is configured and NO_PROXY does not list 127.0.0.1 and "
+            "localhost. Clients can end up sending loopback requests to the "
+            "proxy, which makes a healthy database look unreachable. rememory "
+            "now bypasses proxies for loopback itself -- if an older component "
+            "still fails, set NO_PROXY=127.0.0.1,localhost"
+        )
+    if not proxy_vars and not system_proxy:
+        say("verdict", "no proxy configured -- not a factor here")
 
     head("Docker")
     container_running = False

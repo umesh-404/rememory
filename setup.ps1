@@ -63,6 +63,27 @@ function Invoke-WithTimeout([string]$File, [string[]]$Arguments, [int]$TimeoutSe
     return -1
 }
 
+# Is Qdrant answering on this port? Deliberately NOT Invoke-RestMethod.
+#
+# Invoke-RestMethod uses the system web proxy by default. On a machine with a
+# proxy configured (corporate network, VPN client, proxy app), a request to
+# 127.0.0.1 is handed to that proxy and fails -- so a perfectly healthy
+# container never passes the readiness check and setup dies at this step.
+# HttpWebRequest with Proxy = $null cannot do that. Nothing rememory talks to
+# is ever remote, so a proxy is never correct here.
+function Test-QdrantReady([int]$Port) {
+    try {
+        $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/readyz")
+        $req.Proxy = $null
+        $req.Timeout = 3000
+        $resp = $req.GetResponse()
+        $resp.Close()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Invoke-Quiet([scriptblock]$Command) {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -215,13 +236,26 @@ if ($LASTEXITCODE -ne 0) {
     }
     if ($LASTEXITCODE -ne 0) { Fail "docker compose failed -- see output above." }
 }
-Info "waiting for Qdrant to become ready..."
+Info "waiting for Qdrant to become ready (up to 2 minutes on a first run)..."
 $ready = $false
-foreach ($i in 1..30) {
-    try { Invoke-RestMethod "http://127.0.0.1:$($ports.http)/readyz" -TimeoutSec 2 | Out-Null; $ready = $true; break }
-    catch { Start-Sleep 2 }
+foreach ($i in 1..60) {
+    if (Test-QdrantReady $ports.http) { $ready = $true; break }
+    # A container that has already exited is never going to answer -- stop
+    # waiting the full two minutes and go straight to showing why.
+    if ($i -ge 3) {
+        $state = (docker inspect -f '{{.State.Status}}' rememory-qdrant 2>&1 | Select-Object -Last 1)
+        if ($state -and $state -notmatch 'running|created') { break }
+    }
+    Start-Sleep 2
 }
-if (-not $ready) { Fail "Qdrant did not become ready. Check: docker logs rememory-qdrant" }
+if (-not $ready) {
+    Write-Host ""
+    Write-Host "      Qdrant did not answer. Container state and last log lines:" -ForegroundColor Yellow
+    docker inspect -f '      state={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' rememory-qdrant
+    docker logs --tail 25 rememory-qdrant
+    Write-Host ""
+    Fail "Qdrant did not become ready -- the container output above says why."
+}
 Ok "qdrant ready on 127.0.0.1:$($ports.http) (loopback only -- unreachable from the network)"
 
 # ---------------------------------------------------------------------------
