@@ -154,9 +154,43 @@ Step "Checking prerequisites (Docker, Ollama)"
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Fail "Docker not found. Install Docker Desktop: https://docs.docker.com/desktop/setup/install/windows-install/"
 }
-Invoke-Quiet { docker info }
-if ($LASTEXITCODE -ne 0) { Fail "Docker daemon is not running. Start Docker Desktop, wait for it to say 'running', then re-run." }
-Ok "docker running"
+# Wait for the engine to be GENUINELY ready, not merely answering.
+#
+# Docker Desktop starts in stages: the CLI's named pipe comes up before the
+# Linux engine behind it is functional. In that window, `docker info` can
+# succeed while real operations fail with "request returned 500 Internal
+# Server Error for API route and version ... /images/..." -- which is exactly
+# how a run died at step 5 after passing this check. So the readiness probe
+# is `docker image ls`, which exercises the same /images API route that the
+# later pull needs. Docker Desktop cold-starts in 30-90s; we allow 120.
+$dockerReady = $false
+$sawEngine = $false
+foreach ($i in 1..40) {
+    Invoke-Quiet { docker image ls }
+    if ($LASTEXITCODE -eq 0) { $dockerReady = $true; break }
+    Invoke-Quiet { docker info }
+    if ($LASTEXITCODE -eq 0) { $sawEngine = $true }
+    if ($i -eq 1) { Info "Docker Desktop is still starting -- waiting for the engine (up to 2 min)..." }
+    Start-Sleep 3
+}
+if (-not $dockerReady) {
+    if ($sawEngine) {
+        # The pipe answers but the engine never became functional: the known
+        # wedged state. Only a restart of the Docker stack clears it.
+        Write-Host ""
+        Write-Host "      Docker Desktop is running but its engine is not responding" -ForegroundColor Yellow
+        Write-Host "      (API requests return 500). This is a known Docker Desktop state." -ForegroundColor Yellow
+        Write-Host "      Fix it with either of these, then re-run setup:" -ForegroundColor Yellow
+        Write-Host "        1. Quit Docker Desktop completely (right-click the whale icon"
+        Write-Host "           in the system tray -> Quit), start it again, wait for the"
+        Write-Host "           green 'running' state."
+        Write-Host "        2. If that does not help, run:  wsl --shutdown   then start"
+        Write-Host "           Docker Desktop again."
+        Fail "Docker's engine is in a broken state -- restart Docker Desktop and re-run."
+    }
+    Fail "Docker daemon is not running. Start Docker Desktop, wait for it to say 'running', then re-run."
+}
+Ok "docker engine ready"
 if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
     Fail "Ollama not found. Install it: https://ollama.com/download"
 }
@@ -245,6 +279,31 @@ Step "Starting the vector database (Qdrant in Docker, data stays in $Root\data)"
 New-Item -ItemType Directory -Force "$Root\data\qdrant\storage", "$Root\data\qdrant\snapshots", "$Root\data\logs", "$Root\data\backups" | Out-Null
 # `docker compose` (plugin) with `docker-compose` (standalone) as fallback --
 # older Docker installs only have the hyphenated binary.
+# Pull the image explicitly, with retries, BEFORE compose touches it. A
+# still-settling Docker Desktop engine intermittently answers image requests
+# with "500 Internal Server Error for API route and version"; retrying after a
+# pause rides that out, and separating the pull from `compose up` means a pull
+# problem is reported as a pull problem instead of a generic compose failure.
+$pulled = $false
+foreach ($attempt in 1..3) {
+    docker pull qdrant/qdrant:v1.18.3
+    if ($LASTEXITCODE -eq 0) { $pulled = $true; break }
+    if ($attempt -lt 3) {
+        Info "image pull failed (attempt $attempt/3) -- waiting 15s for Docker's engine to settle..."
+        Start-Sleep 15
+    }
+}
+if (-not $pulled) {
+    Write-Host ""
+    Write-Host "      Could not pull the database image after 3 attempts." -ForegroundColor Yellow
+    Write-Host "      If the error above mentions '500 Internal Server Error', Docker" -ForegroundColor Yellow
+    Write-Host "      Desktop's engine is in a broken state:" -ForegroundColor Yellow
+    Write-Host "        1. Quit Docker Desktop completely and start it again, or"
+    Write-Host "        2. run:  wsl --shutdown   then start Docker Desktop."
+    Write-Host "      If it mentions a network/DNS error, check your internet connection."
+    Fail "Could not pull qdrant/qdrant:v1.18.3 -- see above, fix, and re-run."
+}
+
 # Decide UP FRONT whether the compose plugin exists, rather than treating any
 # failure as "plugin missing". Falling back on a real error (a port clash, say)
 # ran the standalone binary against the same broken state, which then reused

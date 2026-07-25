@@ -75,6 +75,17 @@ ok "reranker model ready (Qwen3-Reranker-0.6B)"
 
 step "Starting the vector database (Qdrant in Docker, data stays in $ROOT/data)"
 mkdir -p data/qdrant/storage data/qdrant/snapshots data/logs data/backups
+# Pre-pull with retries: a still-settling Docker engine intermittently fails
+# image requests (500); a pause-and-retry rides it out.
+pulled=""
+for attempt in 1 2 3; do
+  if docker pull qdrant/qdrant:v1.18.3; then pulled=1; break; fi
+  [ "$attempt" -lt 3 ] && { info "image pull failed (attempt $attempt/3) -- retrying in 15s..."; sleep 15; }
+done
+[ -n "$pulled" ] || fail "Could not pull qdrant/qdrant:v1.18.3 -- if the error mentions a 500, restart Docker and re-run."
+# Remove any stale container from a failed run: it may hold the port and
+# crash-loop; all data lives in the bind mount, so this loses nothing.
+docker rm -f rememory-qdrant >/dev/null 2>&1 || true
 if ! docker compose -f docker/compose.yml up -d; then
   command -v docker-compose >/dev/null && docker-compose -f docker/compose.yml up -d || fail "docker compose failed."
 fi
