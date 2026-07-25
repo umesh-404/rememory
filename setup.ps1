@@ -194,8 +194,31 @@ Ok "docker engine ready"
 if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
     Fail "Ollama not found. Install it: https://ollama.com/download"
 }
-try { Invoke-RestMethod http://127.0.0.1:11434/api/tags -TimeoutSec 5 | Out-Null }
-catch { Fail "Ollama is installed but not responding. Start the Ollama app and re-run." }
+function Test-Ollama {
+    try { Invoke-RestMethod http://127.0.0.1:11434/api/tags -TimeoutSec 5 | Out-Null; return $true }
+    catch { return $false }
+}
+if (-not (Test-Ollama)) {
+    # Don't tell the user to start Ollama -- start it. After a reboot the
+    # tray app may simply not be running yet, and that is fixable from here.
+    # Prefer the desktop app (it installs its own autostart and tray icon);
+    # fall back to `ollama serve` for a CLI-only install.
+    Info "Ollama is not running -- starting it..."
+    $ollamaApp = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama app.exe"
+    if (Test-Path $ollamaApp) {
+        Start-Process $ollamaApp -WindowStyle Hidden
+    } else {
+        Start-Process "ollama" -ArgumentList "serve" -WindowStyle Hidden
+    }
+    $ollamaUp = $false
+    foreach ($i in 1..20) {   # up to 60s; a cold start is usually < 10
+        if (Test-Ollama) { $ollamaUp = $true; break }
+        Start-Sleep 3
+    }
+    if (-not $ollamaUp) {
+        Fail "Ollama did not come up after being started. Open the Ollama app manually, wait for its tray icon, then re-run."
+    }
+}
 Ok "ollama running"
 
 # ---------------------------------------------------------------------------

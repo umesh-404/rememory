@@ -55,7 +55,24 @@ command -v docker >/dev/null || fail "Docker not found: https://docs.docker.com/
 docker info >/dev/null 2>&1 || fail "Docker daemon not running -- start Docker and re-run."
 ok "docker running"
 command -v ollama >/dev/null || fail "Ollama not found: https://ollama.com/download"
-curl -sf --noproxy '*' http://127.0.0.1:11434/api/tags >/dev/null || fail "Ollama not responding -- start it ('ollama serve' or the app) and re-run."
+ollama_up() { curl -sf --noproxy '*' http://127.0.0.1:11434/api/tags >/dev/null; }
+if ! ollama_up; then
+  # Start it rather than telling the user to: after a reboot it may simply
+  # not be running yet. macOS has the app bundle; elsewhere, a background
+  # `ollama serve` (logged, disowned) covers CLI installs.
+  info "Ollama is not running -- starting it..."
+  if [ "$(uname)" = "Darwin" ] && open -a Ollama 2>/dev/null; then :; else
+    mkdir -p data/logs
+    nohup ollama serve >> data/logs/ollama.log 2>&1 &
+    disown 2>/dev/null || true
+  fi
+  started=""
+  for i in $(seq 1 20); do
+    if ollama_up; then started=1; break; fi
+    sleep 3
+  done
+  [ -n "$started" ] || fail "Ollama did not come up after being started -- start it manually and re-run."
+fi
 ok "ollama running"
 
 step "Ensuring uv (Python toolchain manager)"
