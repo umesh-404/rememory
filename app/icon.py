@@ -59,3 +59,23 @@ def make_icon(state: str = "unknown", size: int = 64):
         d.ellipse(box, fill=colour, outline=(10, 12, 17, 255), width=max(1, int(2 * s)))
 
     return img
+
+
+def write_ico(path) -> bool:
+    """Write a multi-resolution .ico for the Start-menu shortcut.
+
+    Without this the shortcut inherits the icon of whatever binary launches it
+    (uv.exe / powershell.exe), which is why a launcher-script approach looks
+    like clutter rather than an app. Generated at setup time from the same
+    drawing code as the tray icon, so they always match.
+    """
+    from pathlib import Path
+
+    try:
+        base = make_icon("unknown", 256)
+        sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        base.save(str(path), format="ICO", sizes=sizes)
+        return True
+    except Exception:
+        return False

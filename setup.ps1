@@ -185,34 +185,32 @@ if ($LASTEXITCODE -ne 0) { Fail "end-to-end round trip failed." }
 Ok "all verification tests passed"
 
 # ---------------------------------------------------------------------------
-Step "Creating Start-menu shortcuts (Start / Stop / Status -- no terminal needed)"
-$MenuDir = Join-Path ([Environment]::GetFolderPath('StartMenu')) "Programs\rememory"
+Step "Creating the Start-menu shortcut"
+# ONE shortcut: the app itself. Start / Stop / Status / Repair all live
+# inside it (tray menu and dashboard), so separate script shortcuts would
+# just be clutter wearing a PowerShell icon.
+$MenuDir = Join-Path ([Environment]::GetFolderPath('StartMenu')) "Programs"
 New-Item -ItemType Directory -Force $MenuDir | Out-Null
-$Shell = New-Object -ComObject WScript.Shell
-$shortcuts = @(
-    @{ Name = "Start rememory";  Script = "start-rememory.ps1" },
-    @{ Name = "Stop rememory";   Script = "stop-rememory.ps1" },
-    @{ Name = "rememory Status"; Script = "rememory-status.ps1" },
-    @{ Name = "Repair rememory"; Script = "repair-rememory.ps1" }
-)
-# The main app shortcut launches the tray + dashboard (not a .ps1 wrapper, so
-# no console window flashes when it starts).
-$appLnk = $Shell.CreateShortcut((Join-Path $MenuDir "rememory.lnk"))
-$appLnk.TargetPath = $Uv
-$appLnk.Arguments = "run --extra app --directory `"$Root`" -m app.main"
-$appLnk.WorkingDirectory = $Root
-$appLnk.WindowStyle = 7
-$appLnk.Description = "rememory - open the dashboard and tray controls"
-$appLnk.Save()
-foreach ($s in $shortcuts) {
-    $lnk = $Shell.CreateShortcut((Join-Path $MenuDir "$($s.Name).lnk"))
-    $lnk.TargetPath = "powershell.exe"
-    $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$Root\scripts\$($s.Script)`""
-    $lnk.WorkingDirectory = $Root
-    $lnk.Save()
-}
-Ok "Start-menu shortcuts created (rememory, Start, Stop, Status, Repair)"
 
+# Remove shortcuts created by older versions of this installer.
+$legacy = Join-Path $MenuDir "rememory"
+if (Test-Path $legacy) { Remove-Item $legacy -Recurse -Force -ErrorAction SilentlyContinue }
+
+# A real icon, generated from the same code that draws the tray icon --
+# otherwise the shortcut inherits uv.exe's icon.
+$IconPath = Join-Path $Root "dataememory.ico"
+& $Uv run --extra app --directory $Root python -c "from app.icon import write_ico; write_ico(r'$IconPath')" 2>$null | Out-Null
+
+$Shell = New-Object -ComObject WScript.Shell
+$lnk = $Shell.CreateShortcut((Join-Path $MenuDir "rememory.lnk"))
+$lnk.TargetPath = $Uv
+$lnk.Arguments = "run --extra app --directory `"$Root`" -m app.main"
+$lnk.WorkingDirectory = $Root
+$lnk.WindowStyle = 7
+$lnk.Description = "rememory - local memory for AI coding assistants"
+if (Test-Path $IconPath) { $lnk.IconLocation = $IconPath }
+$lnk.Save()
+Ok "Start-menu shortcut created (search: rememory)"
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "Setup complete." -ForegroundColor Green

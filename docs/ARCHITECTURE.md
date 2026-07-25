@@ -198,6 +198,18 @@ independently. `backend.Api` never raises into the UI: everything returns
 HTML/CSS/JS with no build step and no external assets, so `git pull` updates
 the interface exactly like it updates the Python.
 
+## Start/Stop scoping
+
+Both are deliberately narrow, because every dependency is shared with the rest
+of the machine. **Stop** stops the container through compose (which by
+definition only knows our own service, so other containers cannot be affected)
+and unloads our two models by NAME via Ollama's `keep_alive: 0` -- other
+models stay resident and the Ollama process is never touched. Model names come
+from `config/embedding.yaml`, so this can never drift from what the indexer
+and reranker actually use. **Start** reverses both and pre-warms the models.
+Unloading is asynchronous in Ollama (`/api/ps` briefly still lists a freed
+model), so the result is confirmed by polling rather than a single check.
+
 ## Deliberately not included
 
 - **LLM auto-extraction of memories** — Claude is the extractor; explicit

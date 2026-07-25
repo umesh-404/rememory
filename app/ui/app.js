@@ -97,8 +97,10 @@ async function refreshStatus(showToast = false) {
 
   paintService("docker", st.services.docker, "Running", "Not running");
   paintService("database", st.services.database, "Running", "Offline");
+  const mdl = st.models || {};
   paintService("models", st.services.models,
-    "Ready", st.services.ollama ? "Models missing" : "Ollama offline");
+    mdl.loaded ? `Ready · ${mdl.loaded}/${mdl.total} loaded` : "Ready (idle)",
+    st.services.ollama ? "Models missing" : "Ollama offline");
 
   const tasks = st.tasks || {};
   const taskKeys = Object.keys(tasks);

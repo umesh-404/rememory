@@ -125,12 +125,22 @@ class Api:
                 r = _run(["schtasks", "/Query", "/TN", task], timeout=8)
                 tasks[task] = bool(r and r.returncode == 0)
 
+        loaded = self._loaded_models() if ollama_up else []
+        ours = self._our_models()
+        ours_loaded = [n for n in ours if any(
+            n == m or n.split(":")[0] == m.split(":")[0] for m in loaded)]
+
         return {
             "services": {
                 "docker": docker_up,
                 "database": qdrant_up,
                 "models": ollama_up and models_ready,
                 "ollama": ollama_up,
+            },
+            "models": {
+                "installed": models_ready,
+                "loaded": len(ours_loaded),
+                "total": len(ours),
             },
             "collections": collections,
             "tasks": tasks,
@@ -178,18 +188,119 @@ class Api:
 
         if not _get_json(f"{OLLAMA}/api/tags"):
             self._launch_ollama()
-            time.sleep(3)
+            for _ in range(10):
+                time.sleep(2)
+                if _get_json(f"{OLLAMA}/api/tags"):
+                    break
+
+        # Bring OUR models back into memory (Stop unloaded them). Pre-warming
+        # here means the first search after Start is instant instead of paying
+        # a model load; other models are never touched.
+        warmed = 0
+        if _get_json(f"{OLLAMA}/api/tags"):
+            for name in self._our_models():
+                if self._load_model(name):
+                    warmed += 1
 
         st = self.status()
-        return (_ok("rememory is running.") if st["healthy"]
-                else _ok("Started what I could -- check the status cards."))
+        detail = f" {warmed} model{'s' if warmed != 1 else ''} loaded and ready." if warmed else ""
+        return (_ok(f"rememory is running.{detail}") if st["healthy"]
+                else _ok(f"Started what I could -- check the status cards.{detail}"))
 
     def stop_stack(self) -> dict:
-        """Stop rememory's own container; leave Docker Desktop and Ollama alone
-        (other apps share them -- killing them would be rude)."""
-        if self._compose("stop"):
-            return _ok("rememory stopped. Docker and Ollama were left running.")
-        return _err("Could not stop the container (is Docker running?).")
+        """Stop ONLY rememory's own pieces.
+
+        Two things, both surgically scoped:
+          * the `rememory-qdrant` container -- via compose, which by
+            definition only knows about our own service, so other containers
+            are untouched;
+          * our two Ollama models, unloaded from memory by NAME. Other models
+            stay loaded and Ollama itself keeps running, because both are
+            shared with whatever else you use them for.
+        """
+        stopped_db = self._compose("stop")
+        unloaded = [name for name in self._our_models() if self._unload_model(name)]
+
+        freed = f" Freed {len(unloaded)} model{'s' if len(unloaded) != 1 else ''} from memory." \
+            if unloaded else ""
+        if stopped_db:
+            return _ok(f"rememory stopped.{freed} Other containers, other models "
+                       f"and Ollama itself were left running.")
+        return _err("Could not stop the database container (is Docker running?)."
+                    + (f"{freed}" if unloaded else ""))
+
+    # ------------------------------------------------------- ollama models
+    def _our_models(self) -> list[str]:
+        """The two models rememory owns, read from config so this can never
+        drift from what the indexer and reranker actually use."""
+        names: list[str] = []
+        try:
+            import yaml
+
+            cfg = yaml.safe_load((ROOT / "config" / "embedding.yaml").read_text(encoding="utf-8"))
+            embed = (cfg.get("model") or {}).get("name")
+            rerank = (cfg.get("reranker") or {}).get("model")
+            names = [n for n in (embed, rerank) if n]
+        except Exception:
+            pass
+        return names
+
+    def _unload_model(self, name: str) -> bool:
+        """Evict one model from memory. `keep_alive: 0` is Ollama's documented
+        way to unload immediately; we try the embedding endpoint first and the
+        generate endpoint second, because a model only answers on one of them."""
+        for path, payload in (
+            ("/api/embed", {"model": name, "input": "", "keep_alive": 0}),
+            ("/api/generate", {"model": name, "prompt": "", "keep_alive": 0}),
+        ):
+            try:
+                req = urllib.request.Request(
+                    f"{OLLAMA}{path}",
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=20):
+                    pass
+            except OSError:
+                continue
+            # Ollama frees the model asynchronously: /api/ps can still list it
+            # for a moment after the request returns. Poll briefly rather than
+            # checking once, or a successful unload reads as a failure.
+            for _ in range(10):
+                if not self._model_loaded(name):
+                    return True
+                time.sleep(0.4)
+        return not self._model_loaded(name)
+
+    def _load_model(self, name: str, keep_alive: str = "30m") -> bool:
+        """Pre-warm a model so the first search after Start is instant."""
+        for path, payload in (
+            ("/api/embed", {"model": name, "input": "warm", "keep_alive": keep_alive}),
+            ("/api/generate", {"model": name, "prompt": "hi", "raw": True,
+                               "stream": False, "options": {"num_predict": 1},
+                               "keep_alive": keep_alive}),
+        ):
+            try:
+                req = urllib.request.Request(
+                    f"{OLLAMA}{path}",
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=180):
+                    pass
+            except OSError:
+                continue
+            if self._model_loaded(name):
+                return True
+        return self._model_loaded(name)
+
+    def _loaded_models(self) -> list[str]:
+        data = _get_json(f"{OLLAMA}/api/ps", timeout=4) or {}
+        return [m.get("name", "") for m in data.get("models", [])]
+
+    def _model_loaded(self, name: str) -> bool:
+        return any(name == m or name.split(":")[0] == m.split(":")[0]
+                   for m in self._loaded_models())
 
     def _compose(self, *args: str) -> bool:
         compose = ROOT / "docker" / "compose.yml"
