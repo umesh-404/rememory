@@ -59,7 +59,7 @@ declare `readOnlyHint`; the single destructive tool declares
 | `save_session` | Session handoff: summary + next steps + files to read first; each save supersedes the previous |
 | `find_project` | Directory → knowledge base: at session start the assistant resolves the working directory to its registered project and links up automatically — no re-registering |
 | `register_project` | Create or repair a project's knowledge base from a prompt ("create a knowledge base for this project") — validates, registers, and indexes in one call |
-| `sync_index` | Re-index a project on demand so freshly written files are searchable immediately |
+| `sync_index` | Re-index a project on demand so freshly written files are searchable immediately (a long first index continues in the background instead of timing out — call it again for the final counts) |
 | `memory_system_status` | Inventory + last-indexed times — distinguishes "nothing indexed" from "nothing matched" |
 | `/kickoff` (prompt) | In Claude Code: `/mcp__rememory__kickoff <project>` loads the briefing and resumes work |
 
@@ -338,7 +338,24 @@ python scripts/diagnose.py
 ```
 
 It is stdlib-only and imports nothing from the project, so it still works when
-the virtualenv is broken — which is exactly when you need it.
+the virtualenv is broken — which is exactly when you need it. The same report
+is one click away in the app: Overview → Quick actions → **Diagnose**.
+
+### Troubleshooting — symptoms seen on real installs
+
+Setup handles most of these automatically now; this table exists so you can
+recognise what happened and know that re-running setup is usually the answer.
+
+| What you see | What it actually is | What to do |
+|---|---|---|
+| Setup crawls forever at "Building the Python environment", often on `proxy-tools` | The clone is inside OneDrive/Dropbox/Google Drive — the sync client intercepts every one of the thousands of files `uv sync` writes | Move the folder somewhere local (e.g. `C:\rememory`) and re-run. Setup now refuses these paths up front |
+| `docker compose` dies with `Bind for 127.0.0.1:63xx failed: port is already allocated` | A container from a previous failed run still holds the port | Just re-run setup — it now removes the stale container first. All data survives; it lives in `data\`, not in the container |
+| Qdrant restarts forever; logs say `Failed to load local shard … expected struct StoredDocument` | A torn index — on Windows the bind-mounted storage doesn't get the write ordering Qdrant expects, and an unclean shutdown can corrupt it | Re-run setup: it detects this, deletes only the rebuildable `code`/`docs` collections, and re-indexes. Your `memory` collection is never touched; if *it* is the damaged one, restore with `uv run scripts/import_memory.py` |
+| `unable to get image … request returned 500 Internal Server Error for API route and version` | Docker Desktop's CLI is answering but the Linux engine behind it isn't ready (or is wedged) | Setup now waits for the engine and retries the pull. If it still fails: quit Docker Desktop fully and restart it; stubborn cases need `wsl --shutdown`, then start Docker Desktop again |
+| `SETUP FAILED … Ollama is installed but not responding` | Ollama isn't running — commonly right after a reboot | Setup now starts Ollama itself and waits. If it still fails, open the Ollama app once by hand |
+| Dashboard shows Database "Offline" / Docker flickering while everything looks fine in Docker Desktop | A proxy (corporate, VPN) was swallowing loopback requests, or a probe timed out on a cold WSL2 port-forward | Fixed in the app — it bypasses proxies for 127.0.0.1 and rides out single blips. If you still see it, run **Diagnose**: it names the exact cause, including proxy settings |
+| A dark window titled `rememory` or `Select rememory` with nothing in it | Not the dashboard — an old console window from a pre-`ee8eb25` shortcut. Clicking inside it froze the app (Windows QuickEdit) | `git pull`, then re-run setup once so the Start-menu shortcut is recreated to launch via `pythonw.exe` (pulling code alone does not update the shortcut) |
+| Crash popups from `WavesSvc64.exe` or other `*.exe` you don't recognise | A third-party service on your machine (Waves MaxxAudio ships with Dell/HP audio drivers) — unrelated to rememory or Docker | Update the audio driver, or disable the Waves service in `services.msc`. Nothing in rememory needs changing |
 
 **If anything ever breaks** — weeks later, after an OS update, whatever —
 use **Repair** in the app (Overview -> Quick actions, or the tray menu), or

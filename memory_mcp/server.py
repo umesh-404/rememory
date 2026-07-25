@@ -20,17 +20,32 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 from typing import Any
 
 # Auto-update check FIRST, before any project module is imported: if a newer
 # version is pulled, the process re-execs so the freshly pulled code -- not a
 # mix of old loaded modules and new files -- is what serves the client.
 # Stdlib-only; every failure is a silent skip (see updater.py).
+# This one MUST stay synchronous -- it re-execs the process -- but it is
+# bounded by GIT_TIMEOUT (8s) and throttled to one check per 15 minutes.
 from .health import ensure_services
 from .updater import maybe_update
 
 maybe_update()
-ensure_services()
+
+# Self-healing runs in the BACKGROUND. It shells out to docker, which on a
+# cold or wedged Docker Desktop can take well over a minute (30s for `docker
+# info`, 60s for `docker start`, then a readiness wait). Doing that here at
+# import time meant the server had not finished starting when the client sent
+# its first tool call, and the call died with "MCP error -32001: Request timed
+# out" -- while the heal itself was working fine.
+#
+# Nothing depends on the heal having finished: every tool is wrapped in _guard,
+# which reports a clear "database is offline" message if Qdrant is not up yet.
+# Healing concurrently just means the next call succeeds instead.
+threading.Thread(target=ensure_services, name="rememory-heal", daemon=True).start()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.types import ToolAnnotations  # noqa: E402
@@ -750,6 +765,28 @@ def memory_system_status() -> str:
     return _dump(out)
 
 
+# Background sync bookkeeping. A sync that outlives the client's request
+# timeout must not be lost or duplicated: the thread keeps running and the
+# next sync_index call collects its result.
+_SYNC_JOBS: dict[str, dict] = {}
+# Comfortably under the MCP client request timeout, so a slow sync is reported
+# as "still running" by us rather than as a timeout error by the client.
+_SYNC_GRACE_SECONDS = 20.0
+
+
+def _sync_job(project: str) -> dict | None:
+    return _SYNC_JOBS.get(project)
+
+
+def _sync_finish(project: str, job: dict) -> dict:
+    """Collect a completed job's result and clear it."""
+    _SYNC_JOBS.pop(project, None)
+    out = dict(job.get("result") or {})
+    out.setdefault("project", project)
+    out["took_seconds"] = round(time.time() - job["started"], 1)
+    return out
+
+
 @app.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
 @_guard
 def sync_index(project: str) -> str:
@@ -758,8 +795,12 @@ def sync_index(project: str) -> str:
     Call this when search results look stale -- e.g. you just wrote or edited
     files and want them findable, or memory_system_status shows an old
     last_indexed. Fast: unchanged files are skipped by content hash, chunks of
-    deleted files are purged. Typical run is a few seconds; a project with
-    heavy changes can take a minute.
+    deleted files are purged. Typical run is under a second.
+
+    A large first index can take minutes. Rather than hold the connection open
+    and risk the client's request timeout, this returns after a short wait with
+    the sync still running in the background -- call it again for progress and
+    the final counts. It never starts a second sync for the same project.
     """
     if project not in cfg.projects:
         return f"REJECTED: unknown project {project!r}. Registered: {', '.join(cfg.projects)}"
@@ -785,19 +826,21 @@ def sync_index(project: str) -> str:
     # delete-then-write on the same points.
     from indexer.lockfile import holder_age_seconds, index_lock
 
-    with index_lock() as acquired:
-        if not acquired:
-            age = holder_age_seconds() or 0.0
-            return (
-                f"BUSY: another index/sync is already running "
-                f"({age:.0f}s old). The index will be fresh when it finishes -- "
-                f"just retry the search; no action needed."
+    def _run_sync() -> dict:
+        with index_lock() as acquired:
+            if not acquired:
+                age = holder_age_seconds() or 0.0
+                return {
+                    "project": project,
+                    "busy": True,
+                    "note": f"Another index/sync is already running ({age:.0f}s old). "
+                            f"The index will be fresh when it finishes -- just retry "
+                            f"the search; no action needed.",
+                }
+            stats = _SYNC_PIPELINE.index_project(
+                proj, store, searcher.embedder, only_changed=True
             )
-        stats = _SYNC_PIPELINE.index_project(
-            proj, store, searcher.embedder, only_changed=True
-        )
-    return _dump(
-        {
+        return {
             "project": project,
             "files_seen": stats.files_seen,
             "reindexed": stats.files_indexed,
@@ -809,7 +852,59 @@ def sync_index(project: str) -> str:
             "secrets_redacted": stats.secrets_redacted,
             "errors": stats.errors[:5],
         }
-    )
+
+    job = _sync_job(project)
+
+    # A sync started by an earlier call is still going: report progress rather
+    # than starting a second one or blocking again.
+    if job and job["thread"].is_alive():
+        job["thread"].join(timeout=_SYNC_GRACE_SECONDS)
+        if job["thread"].is_alive():
+            return _dump({
+                "project": project,
+                "status": "running",
+                "elapsed_seconds": round(time.time() - job["started"], 1),
+                "note": "Still indexing in the background. Call sync_index again "
+                        "for the final counts; searches already work against "
+                        "whatever has been written so far.",
+            })
+        return _dump(_sync_finish(project, job))
+
+    # A finished sync nobody has collected yet -- hand back its result once.
+    if job and job.get("done"):
+        return _dump(_sync_finish(project, job))
+
+    started = time.time()
+    result: dict = {}
+
+    def _worker() -> None:
+        try:
+            result.update(_run_sync())
+        except Exception as exc:  # never let a thread die silently
+            result.update({"project": project, "error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            job_ref["done"] = True
+
+    job_ref = {"started": started, "result": result, "done": False}
+    thread = threading.Thread(target=_worker, name=f"sync-{project}", daemon=True)
+    job_ref["thread"] = thread
+    _SYNC_JOBS[project] = job_ref
+    thread.start()
+
+    # Wait briefly: the common case (a warm project with few changes) finishes
+    # in well under a second, and answering with the real counts is much more
+    # useful than telling the caller to check back.
+    thread.join(timeout=_SYNC_GRACE_SECONDS)
+    if thread.is_alive():
+        return _dump({
+            "project": project,
+            "status": "running",
+            "elapsed_seconds": round(time.time() - started, 1),
+            "note": "Indexing is taking a while, so it continues in the "
+                    "background rather than timing out this request. Call "
+                    "sync_index again for the final counts.",
+        })
+    return _dump(_sync_finish(project, job_ref))
 
 
 def main() -> None:
