@@ -327,6 +327,19 @@ demand. Two layers cover the exceptions:
 
 On macOS/Linux, launch the same app with `uv run --extra app -m app.main`.
 
+**If the app says a service is offline but it looks fine to you**, run the
+diagnostic. It changes nothing, and it tells you which specific thing is
+wrong — a stopped container, a port the app and the container disagree about,
+an environment variable overriding your config, or something other than Qdrant
+listening on the port:
+
+```bash
+python scripts/diagnose.py
+```
+
+It is stdlib-only and imports nothing from the project, so it still works when
+the virtualenv is broken — which is exactly when you need it.
+
 **If anything ever breaks** — weeks later, after an OS update, whatever —
 use **Repair** in the app (Overview -> Quick actions, or the tray menu), or
 re-run `setup.ps1` / `./setup.sh`. Every setup step is idempotent and

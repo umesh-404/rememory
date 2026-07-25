@@ -10,8 +10,8 @@ What this deliberately does NOT do: launch Docker Desktop or Ollama
 themselves. Both are GUI applications the user chose to run (or not);
 force-starting them from a background process is surprising behaviour and
 slow (Docker Desktop takes ~30s+). For those cases the tool guard messages
-already tell the user exactly what to click, and the Start-menu
-"Start rememory" shortcut does it for them.
+already tell the user exactly what to click, and the rememory app's Start
+button does it for them.
 
 All output to stderr (stdout is JSON-RPC). Never raises: a failed heal just
 leaves things as they were, and the per-tool guards report actionable
@@ -30,8 +30,17 @@ from indexer.runtime import compose_env, qdrant_url
 QDRANT_READY = f"{qdrant_url()}/readyz"
 CONTAINER = "rememory-qdrant"
 
+# Never flash a console window when shelling out to docker on Windows.
+_NO_WINDOW = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
-def _qdrant_up(timeout: float = 2.0) -> bool:
+
+def _qdrant_up(timeout: float = 6.0) -> bool:
+    """Is Qdrant answering?
+
+    Generous timeout on purpose: with Docker's WSL2 backend the first request
+    after an idle period is often slow to be forwarded, and a short limit made
+    a healthy database look offline.
+    """
     try:
         with urllib.request.urlopen(QDRANT_READY, timeout=timeout):
             return True
@@ -44,28 +53,46 @@ def ensure_services() -> None:
     if _qdrant_up():
         return
 
-    # Is the Docker daemon itself reachable?
+    # Is the Docker daemon itself reachable? `docker info` talks to the daemon
+    # and is slow on a cold Docker Desktop -- 30s, because timing out here and
+    # declaring Docker down is worse than waiting.
     try:
         daemon = subprocess.run(
             ["docker", "info", "--format", "ok"],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True, text=True, timeout=30, check=False, **_NO_WINDOW,
         )
-    except (OSError, subprocess.SubprocessError):
-        daemon = None
-    if daemon is None or daemon.returncode != 0:
-        print(
-            "rememory: the vector database is offline because Docker isn't "
-            "running. Start Docker Desktop (or use the 'Start rememory' "
-            "shortcut) and searches will work.",
-            file=sys.stderr,
-        )
+        reachable = daemon.returncode == 0
+        determined = True
+    except subprocess.SubprocessError:
+        # Timed out or otherwise inconclusive. We genuinely do not know
+        # whether Docker is running, and saying "Docker isn't running" when
+        # it is sends the user chasing the wrong problem.
+        reachable, determined = False, False
+    except OSError:
+        reachable, determined = False, True  # docker not installed / not on PATH
+
+    if not reachable:
+        if determined:
+            print(
+                "rememory: the vector database is offline because Docker "
+                "isn't running. Start Docker Desktop and searches will work.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "rememory: could not reach the vector database, and Docker "
+                "did not respond in time. If Docker Desktop is running, give "
+                "it a moment; otherwise run scripts/diagnose.py.",
+                file=sys.stderr,
+            )
         return
 
     print("rememory: starting the local database...", file=sys.stderr)
     try:
         started = subprocess.run(
             ["docker", "start", CONTAINER],
-            capture_output=True, text=True, timeout=30, check=False, env=compose_env(),
+            capture_output=True, text=True, timeout=60, check=False,
+            env=compose_env(), **_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         started = None

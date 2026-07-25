@@ -52,7 +52,15 @@ def _run(args: list[str], timeout: int = 30, cwd: Path | None = None, env: dict 
         return None
 
 
-def _get_json(url: str, timeout: float = 2.0):
+def _get_json(url: str, timeout: float = 6.0):
+    """GET and parse JSON, or None.
+
+    The timeout is deliberately generous. Qdrant runs in Docker, and with the
+    WSL2 backend the first connection after an idle period regularly takes
+    several seconds to be forwarded. At the old 2-second limit a perfectly
+    healthy database intermittently probed as offline, which is what made the
+    dashboard's Docker and Database cards flicker between states.
+    """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return json.load(resp)
@@ -122,6 +130,8 @@ class Api:
         self._tasks_cache: dict | None = None
         self._tasks_checked_at = 0.0
         self._version_cache: dict | None = None
+        self._db_failures = 0
+        self._db_was_up = False
 
     def _scheduled_tasks(self, force: bool = False) -> dict:
         """Which background tasks are registered, cached for _TASKS_TTL_SECONDS.
@@ -155,7 +165,20 @@ class Api:
     # ------------------------------------------------------------ status
     def status(self) -> dict:
         """Everything the Overview tab shows. Cheap enough to poll."""
+        # One failed probe is not evidence of an outage: a busy machine or a
+        # cold WSL2 port forward can lose a single request. Retry once, then
+        # require two consecutive failures before reporting Offline, so a
+        # healthy database stops flickering in the UI.
         qdrant_up = _get_json(f"{QDRANT}/collections") is not None
+        if not qdrant_up:
+            qdrant_up = _get_json(f"{QDRANT}/collections", timeout=10.0) is not None
+        if qdrant_up:
+            self._db_failures = 0
+        else:
+            self._db_failures += 1
+            if self._db_failures < 2 and self._db_was_up:
+                qdrant_up = True  # ride out a single blip
+        self._db_was_up = qdrant_up
 
         # Ask the database first, and only shell out to docker when it is
         # unreachable. `docker info` is a heavyweight process launch, and this
