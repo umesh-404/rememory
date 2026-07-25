@@ -47,8 +47,9 @@ app = FastMCP(
         "code, documentation, and stored knowledge for registered projects. "
         f"Registered projects: {', '.join(cfg.projects)}. "
         "Search before assuming; store durable knowledge after significant work. "
-        "If the project being worked on is NOT in the registered list, offer to "
-        "create a knowledge base for it with register_project."
+        "AT SESSION START: call find_project with the working directory -- if it "
+        "is already registered, continue with get_briefing (never re-register); "
+        "if not, offer to create a knowledge base with register_project."
     ),
 )
 
@@ -380,6 +381,45 @@ def list_memories(
 
 
 # ---------------------------------------------------------------- registration
+@app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@_guard
+def find_project(path: str) -> str:
+    """Which knowledge base belongs to this directory? CALL THIS AT SESSION
+    START with the working directory, before registering anything.
+
+    If the directory (or a parent of it) is already registered, you get the
+    project name to use with every other tool -- continue with get_briefing;
+    do NOT register again. If nothing matches, the directory has no knowledge
+    base yet -- offer the user register_project.
+    """
+    from pathlib import Path as _Path
+
+    try:
+        target = _Path(path).expanduser().resolve()
+    except OSError:
+        return f"REJECTED: cannot resolve path {path!r}."
+
+    for name, proj in cfg.projects.items():
+        try:
+            root = proj.root.resolve()
+        except OSError:
+            continue
+        if target == root or root in target.parents:
+            return _dump({
+                "project": name,
+                "root": str(root),
+                "description": proj.description,
+                "next": f"Call get_briefing(project='{name}') to load its context "
+                        f"-- this directory's knowledge base already exists.",
+            })
+    return (
+        f"NOT REGISTERED: no knowledge base covers {target}. "
+        f"Registered projects: {', '.join(cfg.projects)}. "
+        f"Offer the user to create one with register_project."
+    )
+
+
+
 @app.tool(annotations=ToolAnnotations(destructiveHint=False, idempotentHint=True, openWorldHint=False))  # noqa: E501
 @_guard
 def register_project(
@@ -424,6 +464,19 @@ def register_project(
                 f"Pass the project's real folder (usually the session's cwd).")
     if not description.strip():
         return "REJECTED: give a 1-2 sentence description (shown in briefings)."
+
+    # Duplicate-root guard: one directory, one knowledge base. Registering the
+    # same folder under a second name would split its memories and index
+    # across two projects and double every sync.
+    resolved = root_path.resolve()
+    for existing_name, proj in cfg.projects.items():
+        if existing_name != slug and proj.root.resolve() == resolved:
+            return (
+                f"REJECTED: this directory is already registered as "
+                f"{existing_name!r}. Use that project (get_briefing/"
+                f"search_code with project='{existing_name}') instead of "
+                f"registering it twice."
+            )
 
     registry = ROOT_CONFIG / "projects.yaml"
     data = _yaml.safe_load(registry.read_text(encoding="utf-8")) if registry.exists() else None

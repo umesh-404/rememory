@@ -38,7 +38,7 @@ re-makes a decision you already rejected months ago. rememory fixes that:
 
 ## What your assistant gets
 
-**13 tools + 1 prompt**, all annotated per the MCP spec (read-only tools
+**14 tools + 1 prompt**, all annotated per the MCP spec (read-only tools
 declare `readOnlyHint`; the single destructive tool declares
 `destructiveHint`):
 
@@ -53,6 +53,7 @@ declare `readOnlyHint`; the single destructive tool declares
 | `get_memory` / `list_memories` | Fetch full content by id / browse newest-first with pagination |
 | `get_briefing` | One-call project context block: **where you left off**, all active decisions in full, recent memories, staleness flags |
 | `save_session` | Session handoff: summary + next steps + files to read first; each save supersedes the previous |
+| `find_project` | Directory → knowledge base: at session start the assistant resolves the working directory to its registered project and links up automatically — no re-registering |
 | `register_project` | Create or repair a project's knowledge base from a prompt ("create a knowledge base for this project") — validates, registers, and indexes in one call |
 | `sync_index` | Re-index a project on demand so freshly written files are searchable immediately |
 | `memory_system_status` | Inventory + last-indexed times — distinguishes "nothing indexed" from "nothing matched" |
@@ -169,7 +170,10 @@ The easiest way: open your project in your connected client and say
 
 The assistant calls the `register_project` tool, which validates the folder,
 writes the registry entry, and runs the first index — the project is
-searchable seconds later, no restart needed. The same one prompt is also the
+searchable seconds later, no restart needed. In every later session, the
+assistant resolves your working directory to the existing knowledge base
+automatically (`find_project`) — you register once, ever; a directory can
+never be registered twice under different names. The same one prompt is also the
 **repair path**: if a registration ever breaks (folder moved, registry
 mangled), asking again re-registers and re-indexes it. Your assistant will
 also *offer* to create a knowledge base when it notices the project you're
