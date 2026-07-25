@@ -1,5 +1,7 @@
 # User-specific configuration (copy config/projects.example.yaml to start)
 config/projects.yaml
+# Machine-specific: chosen ports, and the generated MCP snippet
+config/runtime.json
 
 # Live data: vectors, backups, logs. Never ship a user's memories.
 data/

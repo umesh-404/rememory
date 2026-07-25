@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 
+from .runtime import qdrant_url as _qdrant_url
+
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 
@@ -96,7 +98,7 @@ class Config:
     # Passed through as a raw dict: consumed only by memory_mcp/rerank.py,
     # which owns its own defaults. Absent section -> reranking disabled.
     reranker: dict = field(default_factory=dict)
-    qdrant_url: str = "http://127.0.0.1:6333"
+    qdrant_url: str = field(default_factory=lambda: _qdrant_url())
     collections: dict[str, str] = field(
         default_factory=lambda: {"code": "code", "docs": "docs", "memory": "memory"}
     )

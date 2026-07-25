@@ -21,7 +21,7 @@ switch ($Action) {
         docker compose -f "$ComposeDir\compose.yml" up -d
     }
     'down' {
-        # Stops and removes the container. Data on D: is untouched — it lives in
+        # Stops and removes the container. Data on D: is untouched - it lives in
         # a bind mount, not in the container's writable layer.
         docker compose -f "$ComposeDir\compose.yml" down
     }

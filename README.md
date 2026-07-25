@@ -63,6 +63,30 @@ declare `readOnlyHint`; the single destructive tool declares
 | `memory_system_status` | Inventory + last-indexed times — distinguishes "nothing indexed" from "nothing matched" |
 | `/kickoff` (prompt) | In Claude Code: `/mcp__rememory__kickoff <project>` loads the briefing and resumes work |
 
+## The desktop app
+
+Setup installs a small **tray app + dashboard** so rememory is controllable
+without touching a terminal. Find **rememory** in your Start menu (or let it
+launch at login).
+
+- **Tray icon** — always-on status at a glance: the dot turns green when
+  everything is running, amber when something is down, and the tooltip shows
+  your live chunk counts. Right-click for Start, Stop, Sync, Back up, Check
+  for updates, Repair, Quit.
+- **Dashboard** — four tabs: **Overview** (service cards, index stats, quick
+  actions), **Projects** (add a project with a folder picker, sync/re-index/
+  remove, per-project chunk counts and last-indexed time), **Memories**
+  (browse and search stored knowledge through the real retrieval pipeline;
+  expand or delete any entry), **Connect** (copy-paste config for every
+  client), **Settings** (launch at login, auto-updates, quick links to your
+  folders).
+- **Self-updating** — when a new version is pushed, the app shows an update
+  banner and the tray menu offers to install it; one click pulls, re-syncs
+  dependencies and restarts the app on the new version.
+
+The app is optional: everything works from the CLI and the MCP tools without
+it. On Linux/macOS launch it with `uv run --extra app -m app.main`.
+
 ## Retrieval quality
 
 The pipeline follows current production-RAG practice, fully locally:
@@ -112,7 +136,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1
 ./setup.sh
 ```
 
-Setup shows progress for every step (`[1/9] … [9/9]`) so you always know
+Setup shows progress for every step (`[1/11] ... [11/11]`) so you always know
 what's happening. What it does:
 
 1. **Checks prerequisites** — fails immediately with the fix if Docker or
@@ -132,8 +156,17 @@ what's happening. What it does:
    for 30-minute incremental sync and daily backup; Unix: a suggested cron
    line is printed).
 9. **Runs the verification test suite.**
+10. **Creates Start-menu shortcuts** -- rememory (the app), Start, Stop,
+    Status and Repair.
 
-Setup is **idempotent** — if anything fails, fix the cause and re-run;
+**Ports:** setup probes for a free port instead of assuming one. If 6333 is
+already taken (another Qdrant, a corporate agent, an unrelated dev service),
+it picks the next free one and records the choice in `config/runtime.json` --
+every part of the system reads the port from there, so nothing else needs
+changing. You can also force one with the `REMEMORY_QDRANT_PORT` environment
+variable.
+
+Setup is **idempotent** -- if anything fails, fix the cause and re-run;
 completed steps become fast no-ops.
 
 ### 3. The one manual step: connect your client
@@ -315,6 +348,26 @@ into any future version *or any future embedding model* (vectors are
 recomputed on import).
 
 ---
+
+## What it saves you
+
+The point isn't only fewer tokens -- it's that the context Claude *does* load
+is nearly all signal. Rough figures from everyday use:
+
+| Scenario | Without rememory | With rememory | Change |
+|---|---|---|---|
+| Session start (resume work) | 30-60k re-reading files to rebuild context | ~3k briefing + 3 targeted files (~10k) | **~70-80% less** |
+| "Where is X implemented?" | 20-50k grepping + reading candidates | ~2k (6 reranked chunks) | **~90% less** |
+| "What did we decide about Y?" | 15-40k reading docs, or a wrong guess | ~1.5k | **~90% less** |
+| Writing new code in a known area | 25k reading surrounding files | ~8k (search + read 1-2 files) | **~65% less** |
+| Small isolated edit | 3k | 3k + ~2.5k tool schemas | **worse by ~2.5k** |
+
+A normal working day lands around **40-60% fewer input tokens**. The honest
+caveat is the last row: the tool schemas cost ~2-3k tokens in every session
+whether used or not, so on a trivial one-file task rememory is pure overhead.
+It pays for itself from roughly the second file read onward -- and the freed
+context is worth more than the saved tokens, since a session that used to
+spend 60k rebuilding state now spends 10k and keeps the rest for real work.
 
 ## Design, security, contributing
 

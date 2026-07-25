@@ -26,11 +26,16 @@ from __future__ import annotations
 import json
 import math
 import statistics
+import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-OLLAMA = "http://127.0.0.1:11434"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from indexer.runtime import ollama_url  # noqa: E402
+
+OLLAMA = ollama_url()
 
 # --------------------------------------------------------------------------
 # Model definitions.

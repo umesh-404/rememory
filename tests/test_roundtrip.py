@@ -31,6 +31,8 @@ import httpx
 import yaml
 from qdrant_client import QdrantClient, models
 
+from indexer.runtime import qdrant_url
+
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 COLLECTION = "code"  # derived + disposable, so a test can safely write here
 
@@ -69,7 +71,7 @@ def embed(cfg: dict, text: str, *, is_query: bool) -> list[float]:
 
 def main() -> int:
     cfg = yaml.safe_load((CONFIG_DIR / "embedding.yaml").read_text(encoding="utf-8"))
-    client = QdrantClient(url="http://127.0.0.1:6333", timeout=60)
+    client = QdrantClient(url=qdrant_url(), timeout=60)
     run_id = uuid.uuid4().hex[:8]  # tags this run's points so cleanup is exact
 
     print(f"\nPhase 1-3 round trip (run {run_id})\n")

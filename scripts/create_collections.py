@@ -26,6 +26,8 @@ Design notes
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -33,7 +35,27 @@ import yaml
 from qdrant_client import QdrantClient, models
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
-QDRANT_URL = "http://127.0.0.1:6333"
+def _qdrant_url() -> str:
+    """Read the chosen port directly.
+
+    This script runs in its OWN uv environment (see the inline dependency
+    block above), so it cannot import indexer.runtime -- it reads the same
+    config/runtime.json instead. Defaults match indexer/runtime.py.
+    """
+    path = CONFIG_DIR / "runtime.json"
+    port = 6333
+    if path.exists():
+        try:
+            port = int(json.loads(path.read_text(encoding="utf-8")).get("qdrant_port", 6333))
+        except (ValueError, OSError, TypeError):
+            port = 6333
+    env = os.environ.get("REMEMORY_QDRANT_PORT")
+    if env and env.isdigit():
+        port = int(env)
+    return f"http://127.0.0.1:{port}"
+
+
+QDRANT_URL = _qdrant_url()
 
 # Collections that must never be destroyed by tooling: they hold authored
 # knowledge that no re-index can regenerate.

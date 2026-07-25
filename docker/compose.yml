@@ -31,8 +31,10 @@ services:
     container_name: rememory-qdrant
     restart: unless-stopped
     ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
+      # Host ports come from config/runtime.json via the environment, so a
+      # machine where 6333 is taken can use another port with no code edits.
+      - "127.0.0.1:${REMEMORY_QDRANT_PORT:-6333}:6333"
+      - "127.0.0.1:${REMEMORY_QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       # Vector data, payloads and the write-ahead log.
       - ../data/qdrant/storage:/qdrant/storage

@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 Set-Location $Root
 
-$TotalSteps = 10
+$TotalSteps = 11
 $script:StepNo = 0
 function Step([string]$msg) {
     $script:StepNo++
@@ -85,6 +85,26 @@ if ($LASTEXITCODE -ne 0) { Fail "Could not pull the reranker model." }
 Ok "reranker model ready (Qwen3-Reranker-0.6B)"
 
 # ---------------------------------------------------------------------------
+Step "Choosing ports (avoids clashes with anything already running)"
+$portJson = & $Uv run --directory $Root python -c @"
+import json,sys
+sys.path.insert(0, r'$Root')
+from indexer.runtime import pick_free_port, save_runtime, port_is_ours
+http = pick_free_port(6333); grpc = pick_free_port(6334)
+if http is None or grpc is None:
+    print('{\"error\":\"no free port\"}')
+else:
+    save_runtime(qdrant_port=http, qdrant_grpc_port=grpc)
+    print(json.dumps({'http':http,'grpc':grpc,'reused':port_is_ours(http)}))
+"@
+try { $ports = $portJson | ConvertFrom-Json } catch { $ports = $null }
+if ($null -eq $ports -or $ports.error) { Fail "Could not find a free port in 6333-6353. Free one up and re-run." }
+$env:REMEMORY_QDRANT_PORT = "$($ports.http)"
+$env:REMEMORY_QDRANT_GRPC_PORT = "$($ports.grpc)"
+if ($ports.http -eq 6333) { Ok "using the default port 6333" }
+else { Ok "port 6333 was taken -- using $($ports.http) instead (saved to config/runtime.json)" }
+
+# ---------------------------------------------------------------------------
 Step "Starting the vector database (Qdrant in Docker, data stays in $Root\data)"
 New-Item -ItemType Directory -Force "$Root\data\qdrant\storage", "$Root\data\qdrant\snapshots", "$Root\data\logs", "$Root\data\backups" | Out-Null
 # `docker compose` (plugin) with `docker-compose` (standalone) as fallback --
@@ -100,17 +120,21 @@ if ($LASTEXITCODE -ne 0) {
 Info "waiting for Qdrant to become ready..."
 $ready = $false
 foreach ($i in 1..30) {
-    try { Invoke-RestMethod http://127.0.0.1:6333/readyz -TimeoutSec 2 | Out-Null; $ready = $true; break }
+    try { Invoke-RestMethod "http://127.0.0.1:$($ports.http)/readyz" -TimeoutSec 2 | Out-Null; $ready = $true; break }
     catch { Start-Sleep 2 }
 }
 if (-not $ready) { Fail "Qdrant did not become ready. Check: docker logs rememory-qdrant" }
-Ok "qdrant ready on 127.0.0.1:6333 (loopback only -- unreachable from the network)"
+Ok "qdrant ready on 127.0.0.1:$($ports.http) (loopback only -- unreachable from the network)"
 
 # ---------------------------------------------------------------------------
 Step "Building the Python environment (uv sync -- pinned Python 3.12, locked deps)"
 & $Uv sync
 if ($LASTEXITCODE -ne 0) { Fail "uv sync failed." }
-Ok "environment ready"
+# The desktop app (tray + dashboard) is an optional extra: if its GUI
+# dependencies fail on this machine, the core system must still install.
+& $Uv sync --extra app
+if ($LASTEXITCODE -eq 0) { Ok "environment ready (including the desktop app)" }
+else { Ok "environment ready (desktop app extra unavailable -- CLI and MCP work fine)" }
 
 # ---------------------------------------------------------------------------
 Step "Creating vector collections (code / docs / memory)"
@@ -171,6 +195,15 @@ $shortcuts = @(
     @{ Name = "rememory Status"; Script = "rememory-status.ps1" },
     @{ Name = "Repair rememory"; Script = "repair-rememory.ps1" }
 )
+# The main app shortcut launches the tray + dashboard (not a .ps1 wrapper, so
+# no console window flashes when it starts).
+$appLnk = $Shell.CreateShortcut((Join-Path $MenuDir "rememory.lnk"))
+$appLnk.TargetPath = $Uv
+$appLnk.Arguments = "run --extra app --directory `"$Root`" -m app.main"
+$appLnk.WorkingDirectory = $Root
+$appLnk.WindowStyle = 7
+$appLnk.Description = "rememory - open the dashboard and tray controls"
+$appLnk.Save()
 foreach ($s in $shortcuts) {
     $lnk = $Shell.CreateShortcut((Join-Path $MenuDir "$($s.Name).lnk"))
     $lnk.TargetPath = "powershell.exe"
@@ -178,7 +211,7 @@ foreach ($s in $shortcuts) {
     $lnk.WorkingDirectory = $Root
     $lnk.Save()
 }
-Ok "shortcuts in Start menu under 'rememory'"
+Ok "Start-menu shortcuts created (rememory, Start, Stop, Status, Repair)"
 
 # ---------------------------------------------------------------------------
 Write-Host ""

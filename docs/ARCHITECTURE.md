@@ -172,6 +172,32 @@ handoffs legitimately resemble each other).
   and one pipeline across `sync_index` calls (no per-call connection pools),
   and the query-embedding cache is bounded.
 
+## Ports
+
+No port is hardcoded anywhere except as a default in `indexer/runtime.py`.
+Setup probes for a free port, writes the choice to `config/runtime.json`
+(gitignored), and every consumer reads it from `runtime()`. Docker receives it
+through environment substitution in `compose.yml`
+(`${REMEMORY_QDRANT_PORT:-6333}`), which is why every `docker compose`
+invocation must pass `compose_env()` -- otherwise the container would publish
+the default port while Python talked to the chosen one. `port_is_ours()`
+exists so a re-run of setup recognises its own healthy Qdrant on 6333 as
+"already mine" rather than as a conflict. The desktop app's single-instance
+lock scans a range (49517-49526) for the same reason: one squatted port must
+not be mistaken for "already running".
+
+## Desktop app (`app/`)
+
+Two processes, because pystray and pywebview each demand the main thread:
+`main.py` owns the tray on the main thread and launches `window.py` as a
+child process for the dashboard. They share no state -- `backend.py` is the
+single implementation of every action, and every action is a subprocess call
+(docker/uv/git) or a localhost HTTP call, so either process can perform it
+independently. `backend.Api` never raises into the UI: everything returns
+`{ok, message}` and the front-end shows a toast. The UI (`app/ui/`) is plain
+HTML/CSS/JS with no build step and no external assets, so `git pull` updates
+the interface exactly like it updates the Python.
+
 ## Deliberately not included
 
 - **LLM auto-extraction of memories** — Claude is the extractor; explicit

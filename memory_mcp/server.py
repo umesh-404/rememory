@@ -112,8 +112,8 @@ def _guard(fn):
             text = str(exc).lower()
             if "connect" in text or "connection" in text or "refused" in text or "timed out" in text:  # noqa: E501
                 return (
-                    "SERVICE DOWN (Qdrant): cannot reach the vector database at "
-                    "127.0.0.1:6333. Docker Desktop is probably not running. "
+                    "SERVICE DOWN (Qdrant): cannot reach the vector database. "
+                    "Docker Desktop is probably not running. "
                     "Fix: start Docker Desktop, or run "
                     "docker compose -f docker/compose.yml up -d (from the rememory folder). "
                     f"Detail: {type(exc).__name__}: {exc}"

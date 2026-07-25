@@ -26,7 +26,7 @@ KEEP = 30
 
 
 def main() -> None:
-    client = QdrantClient(url="http://127.0.0.1:6333", timeout=60)
+    client = QdrantClient(url=__import__("indexer.runtime", fromlist=["qdrant_url"]).qdrant_url(), timeout=60)
 
     points = []
     offset = None

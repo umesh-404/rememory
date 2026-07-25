@@ -25,7 +25,9 @@ import sys
 import time
 import urllib.request
 
-QDRANT_READY = "http://127.0.0.1:6333/readyz"
+from indexer.runtime import compose_env, qdrant_url
+
+QDRANT_READY = f"{qdrant_url()}/readyz"
 CONTAINER = "rememory-qdrant"
 
 
@@ -63,7 +65,7 @@ def ensure_services() -> None:
     try:
         started = subprocess.run(
             ["docker", "start", CONTAINER],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, timeout=30, check=False, env=compose_env(),
         )
     except (OSError, subprocess.SubprocessError):
         started = None
