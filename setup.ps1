@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 Set-Location $Root
 
-$TotalSteps = 9
+$TotalSteps = 10
 $script:StepNo = 0
 function Step([string]$msg) {
     $script:StepNo++
@@ -125,6 +125,25 @@ if ($LASTEXITCODE -ne 0) { Fail "unit tests failed." }
 & $Uv run tests/test_roundtrip.py
 if ($LASTEXITCODE -ne 0) { Fail "end-to-end round trip failed." }
 Ok "all verification tests passed"
+
+# ---------------------------------------------------------------------------
+Step "Creating Start-menu shortcuts (Start / Stop / Status -- no terminal needed)"
+$MenuDir = Join-Path ([Environment]::GetFolderPath('StartMenu')) "Programs\rememory"
+New-Item -ItemType Directory -Force $MenuDir | Out-Null
+$Shell = New-Object -ComObject WScript.Shell
+$shortcuts = @(
+    @{ Name = "Start rememory";  Script = "start-rememory.ps1" },
+    @{ Name = "Stop rememory";   Script = "stop-rememory.ps1" },
+    @{ Name = "rememory Status"; Script = "rememory-status.ps1" }
+)
+foreach ($s in $shortcuts) {
+    $lnk = $Shell.CreateShortcut((Join-Path $MenuDir "$($s.Name).lnk"))
+    $lnk.TargetPath = "powershell.exe"
+    $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$Root\scripts\$($s.Script)`""
+    $lnk.WorkingDirectory = $Root
+    $lnk.Save()
+}
+Ok "shortcuts in Start menu under 'rememory'"
 
 # ---------------------------------------------------------------------------
 Write-Host ""

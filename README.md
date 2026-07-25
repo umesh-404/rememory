@@ -263,6 +263,26 @@ own recollection of having made it.
 
 ---
 
+## Starting and stopping — no terminal needed
+
+Normally there is nothing to start: Qdrant restarts with Docker, Ollama
+starts at login, and the memory server itself is spawned by your client on
+demand. Two layers cover the exceptions:
+
+- **Self-healing** — if the database container is stopped when a session
+  begins (reboot, Docker restarted without it), the server quietly starts it
+  itself: you just see `rememory: starting the local database... ready.` in
+  the log. Most "it isn't running" cases fix themselves this way.
+- **Start-menu shortcuts** (Windows, created by setup): search the Start
+  menu for **"Start rememory"**, **"Stop rememory"**, or **"rememory
+  Status"**. Each opens a small plain-language window — Start brings up
+  Docker and the whole stack, Stop shuts down rememory's own pieces (leaving
+  Docker Desktop and Ollama alone, since other apps may use them), Status
+  shows a green/yellow health list and what's indexed.
+
+On macOS/Linux the equivalents are `docker compose -f docker/compose.yml
+up -d` / `stop`, and `uv run -m indexer.cli status`.
+
 ## Day-to-day commands
 
 Mostly you need none — sync and backup run on their own. When you want them:

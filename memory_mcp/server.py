@@ -26,9 +26,11 @@ from typing import Any
 # version is pulled, the process re-execs so the freshly pulled code -- not a
 # mix of old loaded modules and new files -- is what serves the client.
 # Stdlib-only; every failure is a silent skip (see updater.py).
+from .health import ensure_services
 from .updater import maybe_update
 
 maybe_update()
+ensure_services()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.types import ToolAnnotations  # noqa: E402
