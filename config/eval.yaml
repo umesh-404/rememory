@@ -1,0 +1,53 @@
+# Golden set for end-to-end retrieval evaluation.
+#
+# Each entry: a query a developer would actually type, and the file (substring
+# match on source_path) that genuinely answers it. Run with:
+#
+#     uv run --directory D:\memory-system tests/eval_retrieval.py
+#
+# Grow this list whenever a real search disappoints: add the query that failed
+# and the file it SHOULD have returned, then tune with an objective scoreboard
+# instead of vibes. Keep queries paraphrased -- wording that avoids the target
+# file's own vocabulary is what actually exercises retrieval.
+
+queries:
+  - project: rememory
+    collection: code
+    query: where do we delete every chunk of a file before writing new ones?
+    expect: indexer/store.py
+  - project: rememory
+    collection: code
+    query: how does a search query get turned into sparse term weights?
+    expect: indexer/sparse.py
+  - project: rememory
+    collection: code
+    query: what happens when a source file cannot be parsed by tree-sitter?
+    expect: indexer/pipeline.py
+  - project: rememory
+    collection: code
+    query: how do we decide that a file is binary and should be skipped?
+    expect: indexer/discovery.py
+  - project: rememory
+    collection: code
+    query: retry logic when the embedding request fails mid-index
+    expect: indexer/embedder.py
+  - project: rememory
+    collection: code
+    query: judging retrieved candidates with a yes or no verdict
+    expect: memory_mcp/rerank.py
+  - project: rememory
+    collection: code
+    query: preventing two nearly identical memories from being saved
+    expect: memory_mcp/memories.py
+  - project: rememory
+    collection: docs
+    query: why did we pick the slower embedding model over the faster one?
+    expect: docs/ARCHITECTURE.md
+  - project: rememory
+    collection: docs
+    query: what protects authored knowledge from being wiped by a reindex?
+    expect: docs/ARCHITECTURE.md
+  - project: rememory
+    collection: docs
+    query: how are file renames handled by the incremental sync?
+    expect: docs/ARCHITECTURE.md

@@ -1,0 +1,158 @@
+# Qdrant collection layout.
+#
+# ===========================================================================
+# THE CENTRAL DESIGN DECISION: partition by DURABILITY, not by project.
+# ===========================================================================
+#
+# The obvious layout is one collection per project (`project-a`, `project-b`,
+# ...). We do not do that. We use three collections split by where the data
+# comes from, with `project` as an indexed payload field inside each:
+#
+#   code    - DERIVED from source files.  Disposable: can always be rebuilt.
+#   docs    - DERIVED from documentation. Disposable: can always be rebuilt.
+#   memory  - AUTHORED by Claude and you. IRREPLACEABLE: rebuilding is impossible.
+#
+# Why this beats per-project collections:
+#
+# 1. SAFETY, which is the real reason. "Re-index project X" is an operation you
+#    will run hundreds of times over the years. If authored memory shared a
+#    collection with derived code, one careless wipe-and-rebuild destroys
+#    architecture decisions that exist nowhere else. Separating by durability
+#    makes that class of accident structurally impossible: the re-index path
+#    never has write access to `memory`.
+#
+# 2. Cross-project search becomes possible. "Have I solved this auth problem
+#    before, on any project?" is one query with no filter. Under per-project
+#    collections it is N queries plus manual result merging.
+#
+# 3. It matches Qdrant's own multitenancy guidance. Collections are not cheap:
+#    each carries its own segments, HNSW graph and memory overhead. Qdrant
+#    recommends a single collection partitioned by an indexed tenant field, and
+#    provides `is_tenant: true` specifically to optimise on-disk layout so each
+#    tenant's points sit together. Per-project collections would grow without
+#    bound as you take on clients; three collections never grow at all.
+#
+# 4. Scoped search still works exactly as well, because every query filters on
+#    the indexed `project` field. You get isolation without the overhead.
+#
+# The trade-off we accept: a bug in filter construction could leak results
+# across projects, which physical separation would have prevented. This is
+# mitigated by making `project` a required payload field and by the search
+# layer (Phase 5) taking `project` as a mandatory argument for code/docs
+# searches rather than an optional one.
+
+schema_version: 1
+
+# Applied to every collection unless overridden.
+defaults:
+  vectors:
+    # NAMED vector, not the default unnamed one. Naming it now means a second
+    # vector (e.g. a different model, or an image embedding) can be added later
+    # without migrating existing points.
+    dense:
+      # These MUST equal config/embedding.yaml -> model.dimensions/distance.
+      # The create script asserts this rather than trusting the comment.
+      size: 1024
+      distance: Cosine
+      on_disk: false # ~50k points x 1024 dims x 4B = ~200 MB. Trivially fits 32 GB RAM.
+
+  sparse_vectors:
+    # Reserved for hybrid search (Phase 5). Sparse vectors carry term-frequency
+    # weights, so an exact identifier like `UserRepository` scores highly even
+    # when the dense model's semantic view is fuzzy. Code search needs this:
+    # symbol names are lexical, not semantic.
+    #
+    # Declared NOW even though nothing populates it yet, because vector
+    # configuration is fixed at collection creation. Points without a sparse
+    # vector are perfectly valid, so declaring it early costs nothing and
+    # avoids a full migration later.
+    lexical:
+      # `idf` makes Qdrant apply inverse-document-frequency at query time,
+      # giving BM25-style scoring where rare terms count for more.
+      modifier: idf
+
+  hnsw_config:
+    # Defaults, stated explicitly so any future change is a visible diff.
+    m: 16
+    ef_construct: 100
+    # NOTE: Qdrant's multitenancy guide suggests m=0 (no global graph) plus
+    # payload_m to build per-tenant subgraphs. We deliberately do NOT do that.
+    # It makes tenant-filtered search faster but degrades UNFILTERED search to
+    # a brute-force scan -- and cross-project memory search is a feature we
+    # want (see reason 2 above). At our corpus size the global graph costs
+    # little. Revisit only if a single project exceeds ~1M points.
+
+  optimizers_config:
+    default_segment_number: 2 # small corpus; fewer segments = faster search
+
+  # Payloads (file paths, source text, notes) are far bigger than the vectors
+  # and are only read for results we actually return. Keeping them on disk
+  # saves RAM at negligible cost.
+  on_disk_payload: true
+
+  # Quantization is deliberately OFF. It trades accuracy for memory, and we
+  # have memory to spare. Revisit only if RAM becomes a constraint.
+
+# Payload fields indexed in every collection. Unindexed fields are still
+# stored and returned -- an index is only needed to FILTER or sort on a field.
+common_payload_indexes:
+  project:
+    type: keyword
+    is_tenant: true # tells Qdrant to co-locate each project's points on disk
+  source_path:
+    type: keyword # exact-match; needed to delete/replace all chunks of one file
+  content_hash:
+    type: keyword # Phase 7 incremental indexing: skip files whose hash is unchanged
+  schema_version:
+    type: integer # lets us detect points embedded by an older model/schema
+  indexed_at:
+    type: datetime
+  content:
+    type: text # full-text index -> keyword filtering and hybrid search support
+    tokenizer: word
+    lowercase: true
+    min_token_len: 2
+    max_token_len: 30
+
+collections:
+  # -------------------------------------------------------------------------
+  code:
+    description: >-
+      Source code chunks, split along symbol boundaries where the language
+      allows it (functions, classes, methods) rather than at arbitrary
+      character counts. Fully derived from files on disk -- safe to wipe and
+      rebuild at any time.
+    payload_indexes:
+      language: { type: keyword } # python, typescript, sql, ...
+      symbol_type: { type: keyword } # function | class | method | interface | component | route | module
+      symbol_name: { type: keyword } # exact lookup: "find UserRepository"
+      git_commit: { type: keyword } # which commit this chunk was indexed from
+      last_modified: { type: datetime }
+
+  # -------------------------------------------------------------------------
+  docs:
+    description: >-
+      Markdown, ADRs, README files, OpenAPI specs, schema docs. Chunked along
+      heading boundaries so a chunk is a coherent section, not a fragment.
+      Also fully derived and safe to rebuild.
+    payload_indexes:
+      doc_type: { type: keyword } # readme | adr | openapi | schema | guide | changelog
+      title: { type: keyword }
+      heading_path: { type: text } # "Architecture > Auth > Token refresh"
+      git_commit: { type: keyword }
+      last_modified: { type: datetime }
+
+  # -------------------------------------------------------------------------
+  memory:
+    description: >-
+      Knowledge authored during development: architecture decisions, feature
+      and API summaries, bug investigations, deployment notes. NOT transcripts
+      -- only distilled, durable conclusions. This collection is never
+      rebuilt from anything; it is the irreplaceable one.
+    payload_indexes:
+      memory_type: { type: keyword } # decision | feature | api | bug | deployment | implementation | design
+      tags: { type: keyword } # array-valued; Qdrant matches any element
+      status: { type: keyword } # active | superseded  (supersede, never silently overwrite)
+      supersedes: { type: keyword } # id of the memory this one replaces
+      created_at: { type: datetime }
+      updated_at: { type: datetime }

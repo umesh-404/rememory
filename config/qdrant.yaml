@@ -1,0 +1,40 @@
+# Qdrant server configuration overlay.
+#
+# This file is mounted at /qdrant/config/production.yaml, which Qdrant reads
+# *after* its built-in config.yaml — so anything set here wins, and anything
+# omitted keeps the upstream default. Keeping this file minimal is deliberate:
+# every line is something we chose, not something we copy-pasted.
+
+storage:
+  # Where collections live inside the container. Bind-mounted to
+  # D:\memory-system\data\qdrant\storage by docker/compose.yml.
+  storage_path: /qdrant/storage
+  snapshots_path: /qdrant/snapshots
+
+  # Keep vectors in RAM. With 32 GB of system memory and a code/docs corpus
+  # measured in tens of thousands of chunks (a few hundred MB of vectors at
+  # most), in-memory is both affordable and dramatically faster than mmap.
+  # If a project ever grows past that, flip this to true per-collection rather
+  # than globally.
+  on_disk_payload: true
+
+  performance:
+    # 0 = let Qdrant pick based on CPU count. The Core Ultra 7 has plenty of
+    # threads; there is no reason to hand-tune this yet.
+    max_search_threads: 0
+
+  optimizers:
+    # Build an HNSW index once a segment exceeds this many KB of vectors.
+    # The default (20000 = ~20 MB) is fine for our corpus size; stated
+    # explicitly so a future change is a visible diff.
+    indexing_threshold_kb: 20000
+
+service:
+  host: 0.0.0.0 # inside the container only; the host-side bind is 127.0.0.1
+  http_port: 6333
+  grpc_port: 6334
+  # Payloads (file paths, code snippets, notes) can be large. 32 MB request
+  # ceiling avoids surprises on bulk upserts of big documents.
+  max_request_size_mb: 32
+
+telemetry_disabled: true

@@ -1,0 +1,24 @@
+# User-specific configuration (copy config/projects.example.yaml to start)
+config/projects.yaml
+
+# Live data: vectors, backups, logs. Never ship a user's memories.
+data/
+
+# Python environments and caches
+.venv/
+__pycache__/
+*.pyc
+.uv-cache/
+.uv-python/
+.pytest_cache/
+.ruff_cache/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Private build journal (contains client/project details -- never publish)
+docs/dev-journal/
+
+# Machine-specific connection snippet written by scripts/connect.py
+mcp-config.json

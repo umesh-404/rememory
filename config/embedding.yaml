@@ -1,0 +1,103 @@
+# Embedding configuration — the single source of truth for how text becomes
+# vectors. Phase 3 (collections), Phase 4 (indexer) and Phase 5 (MCP server)
+# all read this file. Nothing downstream hardcodes a model name or a dimension.
+#
+# CRITICAL INVARIANT
+# ------------------
+# `model`, `dimensions` and the two prefixes must stay in lockstep with what is
+# actually stored in Qdrant. Vectors produced by different models are not
+# comparable -- mixing them does not error, it just silently returns nonsense.
+# Changing any field below therefore requires a FULL RE-INDEX, not a restart.
+# `schema_version` exists to make that violation detectable: the indexer stamps
+# it into every point's payload, and refuses to query a collection whose stamp
+# does not match.
+
+schema_version: 1
+
+provider:
+  kind: ollama
+  base_url: http://127.0.0.1:11434
+  # Ollama unloads an idle model after 5 minutes by default. That would make
+  # the first Claude search after a pause pay a multi-second reload. We ask for
+  # a longer hold *per request* rather than via the global OLLAMA_KEEP_ALIVE
+  # env var, because the global setting would also pin the 9B/14B chat models
+  # and exhaust the 8 GB of VRAM.
+  keep_alive: 30m
+  request_timeout_seconds: 300
+
+model:
+  name: qwen3-embedding:0.6b
+  dimensions: 1024
+  distance: cosine
+
+  # Maximum context Ollama gives this model as loaded. Chunking in Phase 4 must
+  # stay comfortably below this; text beyond the limit is silently TRUNCATED,
+  # which loses content without raising an error.
+  max_context_tokens: 4096
+
+  # These models are asymmetric: queries and documents are embedded with
+  # different prompts so a short question lands near a long answer. Using the
+  # wrong prefix (or none) degrades retrieval silently. Treated as part of the
+  # model definition so no caller can get it wrong.
+  query_prefix: |-
+    Instruct: Given a developer's question, retrieve the source code or documentation passage that answers it
+    Query:
+  document_prefix: ""
+
+# ---------------------------------------------------------------------------
+# Reranking -- the second retrieval stage, per industry practice ("the single
+# highest-impact addition to a basic RAG pipeline"). The first stage (hybrid
+# dense+sparse, RRF) is optimized for RECALL: cast a wide net cheaply. The
+# reranker is a cross-encoder that reads query and document TOGETHER, which is
+# far more accurate than comparing two independently-computed vectors -- and
+# far too slow to run over the whole corpus. So: retrieve ~4x candidates fast,
+# rerank the top few slowly, return the best.
+#
+# Implementation detail that took verification: Ollama has no rerank API, but
+# Qwen3-Reranker emits a single yes/no token when primed with an empty think
+# block via raw mode, and Ollama 0.18+ exposes logprobs -- so the score is
+# softmax(yes, no) over the first generated token's top-logprobs. Measured on
+# this machine: 0.878 relevant / 0.019 related-but-wrong / 0.000 irrelevant,
+# ~190ms per document warm.
+reranker:
+  enabled: true
+  model: dengcao/Qwen3-Reranker-0.6B:F16
+  # How many first-stage candidates get reranked. More = better final order,
+  # linearly slower. 10 at ~190ms sequential is ~2s; concurrency below cuts
+  # wall time further.
+  candidates: 10
+  # Parallel scoring requests to Ollama.
+  concurrency: 4
+  keep_alive: 30m
+  timeout_seconds: 60
+  # Per-call latency guard: if reranking a result set would exceed this, the
+  # search silently falls back to RRF order rather than making Claude wait.
+  max_batch_seconds: 12
+  instruct: >-
+    Given a developer's search query, judge whether the document contains the
+    code or information that answers it.
+
+batching:
+  # Measured on this machine (RTX 5060 8GB): throughput rises steeply to ~32
+  # and is flat beyond it. Larger batches only add latency and memory pressure
+  # for no gain.
+  #   batch=1  -> 11 chunks/s
+  #   batch=8  -> 38 chunks/s
+  #   batch=32 -> 52 chunks/s   <- knee
+  #   batch=128-> 54 chunks/s
+  size: 32
+
+# ---------------------------------------------------------------------------
+# Fallback, kept only so the alternative is documented and re-testable.
+# NOT active. Switching to it means a full re-index (see invariant above).
+# ---------------------------------------------------------------------------
+alternatives:
+  nomic-embed-text:
+    dimensions: 768
+    query_prefix: "search_query: "
+    document_prefix: "search_document: "
+    measured_throughput_per_sec: 154
+    measured_recall_at_1: 0.545
+    note: >-
+      ~3x faster but materially less accurate on this project's benchmark.
+      Reconsider only if indexing time becomes a real constraint.

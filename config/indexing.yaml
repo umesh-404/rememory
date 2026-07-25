@@ -1,0 +1,226 @@
+# Indexing pipeline configuration: what gets indexed, what gets skipped, and
+# how files are cut into chunks.
+
+schema_version: 1
+
+discovery:
+  # Directories skipped entirely, at any depth. Cheaper than filtering files
+  # afterwards -- we never even descend into these.
+  ignore_dirs:
+    - node_modules
+    - .git
+    - .svn
+    - .hg
+    - dist
+    - build
+    - out
+    - target # rust / java
+    - bin
+    - obj # .NET
+    - coverage
+    - htmlcov
+    - .cache
+    - .parcel-cache
+    - .turbo
+    - .next
+    - .nuxt
+    - .svelte-kit
+    - .venv
+    - venv
+    - env
+    - __pycache__
+    - .pytest_cache
+    - .mypy_cache
+    - .ruff_cache
+    - .tox
+    - .idea
+    - .vscode
+    - .gradle
+    - vendor
+    - Pods
+    - .terraform
+    - site-packages
+    - .uv-cache
+    - .uv-python
+
+  # Lock files: enormous, machine-generated, and semantically empty. Indexing
+  # one would flood results with dependency noise for zero insight.
+  ignore_files:
+    # The retrieval golden set: indexing it lets eval queries literally match
+    # their own text, contaminating the scoreboard the file exists to serve.
+    - eval.yaml
+    # Credential material -- never index, by NAME, not by luck of having an
+    # unknown extension. (Token values inside otherwise-normal files are
+    # additionally redacted at ingestion by indexer/redact.py.)
+    - .env
+    - .env.local
+    - .env.development
+    - .env.production
+    - .env.test
+    - .npmrc
+    - .pypirc
+    - .netrc
+    - id_rsa
+    - id_ed25519
+    - id_ecdsa
+    - credentials
+    - credentials.json
+    - service-account.json
+    - .htpasswd
+    - package-lock.json
+    - yarn.lock
+    - pnpm-lock.yaml
+    - bun.lockb
+    - poetry.lock
+    - uv.lock
+    - Pipfile.lock
+    - Cargo.lock
+    - composer.lock
+    - Gemfile.lock
+    - go.sum
+    - .DS_Store
+
+  # Binary and generated formats. Even where text-ish (.svg, .min.js), they
+  # embed to meaningless vectors and waste index space.
+  # (.svg is markup but is almost always path data; .map are source maps)
+  ignore_extensions:
+    [
+      .png, .jpg, .jpeg, .gif, .webp, .ico, .bmp, .tiff, .avif,
+      .mp4, .mov, .avi, .mkv, .webm, .mp3, .wav, .flac, .ogg,
+      .pdf, .zip, .tar, .gz, .bz2, .xz, .7z, .rar,
+      .woff, .woff2, .ttf, .otf, .eot,
+      .exe, .dll, .so, .dylib, .bin, .obj, .o, .a, .lib,
+      .pyc, .pyo, .class, .jar, .wasm,
+      .db, .sqlite, .sqlite3, .mdb,
+      .svg, .map, .pack, .idx,
+      .pem, .key, .pfx, .p12, .jks, .keystore, .asc, .gpg, .kdbx,
+    ]
+
+  # Suffix patterns for generated code: minified bundles, protobuf output,
+  # generated GraphQL/Prisma clients.
+  ignore_suffixes:
+    - .min.js
+    - .min.css
+    - .bundle.js
+    - _pb2.py
+    - _pb2_grpc.py
+    - .generated.ts
+    - .g.dart
+
+  # A file bigger than this is almost certainly generated or a data dump.
+  # 1.5 MB of source is roughly 25,000 lines.
+  max_file_bytes: 1572864
+
+  # Respect the project's own .gitignore. If the repo already declares a file
+  # uninteresting, we agree -- and it keeps this config from having to know
+  # about every project's quirks.
+  respect_gitignore: true
+
+  # A file is treated as binary (and skipped) if its first block contains a NUL
+  # byte or fails UTF-8 decoding. Detection by content, not by extension --
+  # extensions lie.
+  binary_probe_bytes: 8192
+
+chunking:
+  # Size limits are in CHARACTERS, not tokens, because counting tokens exactly
+  # would mean loading the model's tokenizer for every chunk. ~3.5 chars/token
+  # for code, so 6000 chars is roughly 1700 tokens -- comfortably inside the
+  # model's 4096-token context, with headroom for the instruction prefix.
+  # Text beyond the context is silently TRUNCATED by the model, so headroom
+  # here prevents silent data loss.
+  max_chunk_chars: 6000
+
+  # Below this, a chunk carries too little signal to be worth a vector
+  # (a one-line getter, a stray import). Such fragments get merged into a
+  # neighbour rather than stored alone.
+  min_chunk_chars: 100
+
+  # When one symbol exceeds max_chunk_chars it is split by lines, repeating
+  # this many lines at each boundary so a construct spanning the split is not
+  # severed from its context.
+  overlap_lines: 8
+
+  # Prepend a breadcrumb ("path :: Class.method", "README > Setup > Docker") to
+  # the text that gets EMBEDDED -- not to the text stored in the payload. A
+  # bare chunk of code often lacks the words a developer would search for; the
+  # file path and symbol name supply them. Stored content stays verbatim so
+  # what Claude reads back is exactly what is on disk.
+  contextual_header: true
+
+# Which chunker handles which file, keyed by extension.
+#   code -> tree-sitter symbol-aware splitting
+#   docs -> markdown heading-aware splitting
+#   text -> plain line-window fallback
+languages:
+  .py: { chunker: code, ts: python, language: python }
+  .pyi: { chunker: code, ts: python, language: python }
+  .ts: { chunker: code, ts: typescript, language: typescript }
+  .mts: { chunker: code, ts: typescript, language: typescript }
+  .cts: { chunker: code, ts: typescript, language: typescript }
+  .tsx: { chunker: code, ts: tsx, language: typescript }
+  .js: { chunker: code, ts: javascript, language: javascript }
+  .mjs: { chunker: code, ts: javascript, language: javascript }
+  .cjs: { chunker: code, ts: javascript, language: javascript }
+  .jsx: { chunker: code, ts: javascript, language: javascript }
+  .go: { chunker: code, ts: go, language: go }
+  .rs: { chunker: code, ts: rust, language: rust }
+  .java: { chunker: code, ts: java, language: java }
+  .cs: { chunker: code, ts: csharp, language: csharp }
+  .rb: { chunker: code, ts: ruby, language: ruby }
+  .php: { chunker: code, ts: php, language: php }
+  .c: { chunker: code, ts: c, language: c }
+  .h: { chunker: code, ts: c, language: c }
+  .cpp: { chunker: code, ts: cpp, language: cpp }
+  .hpp: { chunker: code, ts: cpp, language: cpp }
+  .sql: { chunker: code, ts: sql, language: sql }
+  .sh: { chunker: code, ts: bash, language: shell }
+  .bash: { chunker: code, ts: bash, language: shell }
+  .css: { chunker: code, ts: css, language: css }
+  .scss: { chunker: code, ts: scss, language: css }
+  .html: { chunker: code, ts: html, language: html }
+  .vue: { chunker: text, language: vue } # SFC: three grammars in one file
+  .svelte: { chunker: text, language: svelte }
+
+  .md: { chunker: docs, language: markdown }
+  .mdx: { chunker: docs, language: markdown }
+  .rst: { chunker: docs, language: rst }
+  .txt: { chunker: docs, language: text }
+  .adoc: { chunker: docs, language: asciidoc }
+
+  .yaml: { chunker: text, language: yaml }
+  .yml: { chunker: text, language: yaml }
+  .json: { chunker: text, language: json }
+  .toml: { chunker: text, language: toml }
+  .ini: { chunker: text, language: ini }
+  .env.example: { chunker: text, language: dotenv }
+  .tf: { chunker: text, language: terraform }
+  .dockerfile: { chunker: text, language: dockerfile }
+  .graphql: { chunker: text, language: graphql }
+  .prisma: { chunker: text, language: prisma }
+
+# Filename patterns that route a file to the `docs` collection and set its
+# doc_type, regardless of extension. Checked in order; first match wins.
+doc_classification:
+  - { pattern: "readme*", type: readme }
+  - { pattern: "changelog*", type: changelog }
+  - { pattern: "contributing*", type: guide }
+  - { pattern: "adr-*", type: adr }
+  - { pattern: "*/adr/*", type: adr }
+  - { pattern: "*/decisions/*", type: adr }
+  - { pattern: "openapi*", type: openapi }
+  - { pattern: "swagger*", type: openapi }
+  - { pattern: "*schema*.sql", type: schema }
+  - { pattern: "*/docs/*", type: guide }
+  - { pattern: "*.md", type: guide }
+
+sparse:
+  # Term-frequency vectors for hybrid search. Built locally with no extra
+  # dependency: tokens are hashed to 32-bit ids and Qdrant applies IDF
+  # weighting server-side (the `modifier: idf` set in collections.yaml).
+  enabled: true
+  # Identifiers are split on camelCase and snake_case boundaries in ADDITION to
+  # being kept whole, so a search for "user repository" matches
+  # `UserRepository` and a search for the exact symbol still matches too.
+  split_identifiers: true
+  min_token_len: 2
+  max_tokens_per_chunk: 512

@@ -1,0 +1,28 @@
+# Registry of projects rememory indexes. COPY THIS FILE to projects.yaml and
+# edit -- projects.yaml is yours (gitignored); this example is the template.
+#
+# The `name` key lands in every indexed chunk's `project` field and is what
+# you pass to the search tools. Renaming a project after indexing orphans its
+# vectors -- re-index after any rename.
+#
+# Add a project:
+#   1. add an entry below (in projects.yaml)
+#   2. uv run -m indexer.cli index --project <name>
+
+projects:
+  # Rememory indexes itself so Claude can answer questions about how it works.
+  rememory:
+    root: .                    # relative paths resolve against this repo's root
+    description: >-
+      The rememory system itself: local development memory for Claude Code
+      (Qdrant + Ollama + MCP).
+    extra_ignore_dirs:
+      - data                   # Qdrant storage: binary, enormous, meaningless as text
+    include_only: []
+
+  # my-app:
+  #   root: C:\code\my-app     # absolute paths work anywhere
+  #   description: >-
+  #     One or two sentences about what this project is. Shown in briefings.
+  #   extra_ignore_dirs: []    # ADDED to the global ignore rules, never replaces
+  #   include_only: []         # restrict to subtrees; empty = whole root

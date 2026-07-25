@@ -1,0 +1,60 @@
+# Qdrant — the vector database that stores all embeddings for the memory system.
+#
+# Design decisions (Phase 1):
+#
+# 1. Pinned tag `v1.18.3` instead of `latest`.
+#    Qdrant persists an on-disk storage format. `latest` would silently upgrade
+#    the engine under your data on any `docker compose pull`. Upgrades should be
+#    a deliberate, backed-up act. Bump this line on purpose, never by accident.
+#
+# 2. Bind mount to D:\ instead of a Docker named volume.
+#    On Windows, Docker Desktop named volumes live inside the WSL2 virtual disk
+#    (docker_data.vhdx), which sits on C: — and C: has ~23 GB free. A bind mount
+#    puts the vectors on D: where there is room, and makes them plainly visible
+#    and backup-able as ordinary files.
+#
+# 3. Ports published to 127.0.0.1 only.
+#    Qdrant runs with no authentication by default. Binding to the loopback
+#    interface means nothing on your LAN or any coffee-shop Wi-Fi can reach it.
+#    This is why no API key is needed at this stage.
+#
+#      6333 = REST/HTTP API + the web dashboard
+#      6334 = gRPC API (faster; the Python client uses it for bulk upserts)
+#
+# 4. restart: unless-stopped
+#    Qdrant comes back automatically when Docker Desktop starts, so the memory
+#    system is available without you remembering to start it.
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.18.3
+    container_name: rememory-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      # Vector data, payloads and the write-ahead log.
+      - ../data/qdrant/storage:/qdrant/storage
+      # Snapshots (point-in-time backups) — kept separate so backups are not
+      # tangled up with live storage.
+      - ../data/qdrant/snapshots:/qdrant/snapshots
+      # Read-only config overlay, layered on top of the image's defaults.
+      - ../config/qdrant.yaml:/qdrant/config/production.yaml:ro
+    environment:
+      # Structured JSON logs — easier to grep and to feed into tooling later.
+      QDRANT__LOG_LEVEL: INFO
+    healthcheck:
+      # The image ships no curl and no wget, but it does have bash — so we use
+      # bash's /dev/tcp pseudo-device to speak raw HTTP to Qdrant's /readyz
+      # endpoint. Note `bash -c`, not CMD-SHELL: CMD-SHELL runs /bin/sh, and
+      # /dev/tcp is a bash-only feature that sh does not implement.
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q 200"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
