@@ -90,7 +90,7 @@ Make sure Docker and Ollama are **running** before setup.
 ### 2. Clone and run the master setup
 
 ```bash
-git clone https://github.com/YOUR_USER/rememory
+git clone https://github.com/umesh-404/rememory
 cd rememory
 ```
 
