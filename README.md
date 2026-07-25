@@ -38,7 +38,7 @@ re-makes a decision you already rejected months ago. rememory fixes that:
 
 ## What your assistant gets
 
-**12 tools + 1 prompt**, all annotated per the MCP spec (read-only tools
+**13 tools + 1 prompt**, all annotated per the MCP spec (read-only tools
 declare `readOnlyHint`; the single destructive tool declares
 `destructiveHint`):
 
@@ -53,6 +53,7 @@ declare `readOnlyHint`; the single destructive tool declares
 | `get_memory` / `list_memories` | Fetch full content by id / browse newest-first with pagination |
 | `get_briefing` | One-call project context block: **where you left off**, all active decisions in full, recent memories, staleness flags |
 | `save_session` | Session handoff: summary + next steps + files to read first; each save supersedes the previous |
+| `register_project` | Create or repair a project's knowledge base from a prompt ("create a knowledge base for this project") — validates, registers, and indexes in one call |
 | `sync_index` | Re-index a project on demand so freshly written files are searchable immediately |
 | `memory_system_status` | Inventory + last-indexed times — distinguishes "nothing indexed" from "nothing matched" |
 | `/kickoff` (prompt) | In Claude Code: `/mcp__rememory__kickoff <project>` loads the briefing and resumes work |
@@ -160,7 +161,21 @@ Multiple clients can be connected at once — each spawns its own server
 process, all share the same local data, and writes are serialized by an
 index lock.
 
-### 4. Register your projects
+### 4. Register your projects — just ask your assistant
+
+The easiest way: open your project in your connected client and say
+
+> **"Create a knowledge base for this project in rememory."**
+
+The assistant calls the `register_project` tool, which validates the folder,
+writes the registry entry, and runs the first index — the project is
+searchable seconds later, no restart needed. The same one prompt is also the
+**repair path**: if a registration ever breaks (folder moved, registry
+mangled), asking again re-registers and re-indexes it. Your assistant will
+also *offer* to create a knowledge base when it notices the project you're
+working on isn't registered yet.
+
+Prefer doing it by hand? The equivalent is:
 
 ```yaml
 # config/projects.yaml  (yours; gitignored)

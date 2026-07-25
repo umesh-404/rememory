@@ -17,7 +17,19 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-STALE_SECONDS = 1800  # a real index run finishes well inside 30 minutes
+# The HOLDER refreshes the lock's mtime as it works (see Pipeline's per-file
+# heartbeat), so staleness only means "holder died". 5 minutes keeps the
+# post-crash BUSY window short; without the heartbeat this had to be 30
+# minutes to survive a long first index, which made crashes expensive.
+STALE_SECONDS = 300
+
+
+def heartbeat() -> None:
+    """Refresh the lock's mtime; called periodically by the work loop."""
+    import contextlib
+
+    with contextlib.suppress(OSError):
+        os.utime(LOCK_PATH)
 
 LOCK_PATH = Path(__file__).resolve().parent.parent / "data" / ".index.lock"
 

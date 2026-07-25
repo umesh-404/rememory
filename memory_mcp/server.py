@@ -33,6 +33,7 @@ maybe_update()
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.types import ToolAnnotations  # noqa: E402
 
+from indexer.config import CONFIG_DIR as ROOT_CONFIG  # noqa: E402
 from indexer.config import load_config  # noqa: E402
 
 from .memories import MemoryError, MemoryStore  # noqa: E402
@@ -45,12 +46,29 @@ app = FastMCP(
         "Local development memory: semantic+lexical search over indexed source "
         "code, documentation, and stored knowledge for registered projects. "
         f"Registered projects: {', '.join(cfg.projects)}. "
-        "Search before assuming; store durable knowledge after significant work."
+        "Search before assuming; store durable knowledge after significant work. "
+        "If the project being worked on is NOT in the registered list, offer to "
+        "create a knowledge base for it with register_project."
     ),
 )
 
 searcher = Searcher(cfg)
 memory_store = MemoryStore(cfg)
+
+
+def _reload_config() -> None:
+    """Hot-reload configuration after register_project edits projects.yaml.
+
+    load_config() is lru_cached and this module captured `cfg` at import; a
+    freshly registered project would otherwise be rejected by every tool until
+    the client restarts the server -- the exact papercut register_project
+    exists to remove.
+    """
+    global cfg
+    load_config.cache_clear()
+    cfg = load_config()
+    searcher.cfg = cfg
+    memory_store.cfg = cfg
 
 
 def _dump(data: Any) -> str:
@@ -116,7 +134,9 @@ def _bad_project(project: str | None) -> str | None:
         return None
     return (
         f"REJECTED: unknown project {project!r}. "
-        f"Registered: {', '.join(cfg.projects)}"
+        f"Registered: {', '.join(cfg.projects)}. "
+        f"If this is a new (or broken) project, register_project creates or "
+        f"repairs its knowledge base in one call."
     )
 
 
@@ -356,6 +376,110 @@ def list_memories(
         "offset": page["offset"],
         "has_more": page["has_more"],
         "items": items,
+    })
+
+
+# ---------------------------------------------------------------- registration
+@app.tool(annotations=ToolAnnotations(destructiveHint=False, idempotentHint=True, openWorldHint=False))  # noqa: E501
+@_guard
+def register_project(
+    name: str,
+    root: str,
+    description: str,
+) -> str:
+    """Create (or repair) a rememory knowledge base for a project.
+
+    Call this when the user says anything like "create a knowledge base for
+    this project in rememory", "add this project to rememory", or when a
+    project you are working on is not in the registered list -- offer it.
+    Also the one-step FIX when a project's registration is broken or its
+    folder moved: re-registering with the correct root repairs it and
+    re-indexes.
+
+    name: short lowercase slug (letters/digits/hyphens), e.g. "my-app".
+      This becomes the `project` argument for every other tool.
+    root: ABSOLUTE path to the project folder (e.g. the session's working
+      directory).
+    description: 1-2 sentences on what the project is -- shown in briefings.
+
+    Idempotent: registering an existing name updates its details and
+    re-indexes incrementally. Registration + first index happen immediately;
+    afterwards the background sync keeps the project current automatically.
+    """
+    import re as _re
+
+    import yaml as _yaml
+
+    slug = name.strip().lower()
+    if not _re.fullmatch(r"[a-z0-9][a-z0-9-]{0,49}", slug):
+        return ("REJECTED: name must be a short lowercase slug "
+                "(letters, digits, hyphens), e.g. 'my-app'.")
+    from pathlib import Path as _Path
+
+    root_path = _Path(root).expanduser()
+    if not root_path.is_absolute():
+        return f"REJECTED: root must be an absolute path, got {root!r}."
+    if not root_path.is_dir():
+        return (f"REJECTED: {root_path} is not an existing directory. "
+                f"Pass the project's real folder (usually the session's cwd).")
+    if not description.strip():
+        return "REJECTED: give a 1-2 sentence description (shown in briefings)."
+
+    registry = ROOT_CONFIG / "projects.yaml"
+    data = _yaml.safe_load(registry.read_text(encoding="utf-8")) if registry.exists() else None
+    data = data or {}
+    projects = data.get("projects") or {}
+    existed = slug in projects
+    projects[slug] = {
+        "root": str(root_path),
+        "description": description.strip(),
+        "extra_ignore_dirs": (projects.get(slug) or {}).get("extra_ignore_dirs", []),
+        "include_only": (projects.get(slug) or {}).get("include_only", []),
+    }
+    data["projects"] = projects
+    registry.write_text(
+        "# rememory project registry (yours; gitignored).\n"
+        "# Managed by the register_project tool -- hand-editing also works.\n"
+        + _yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    _reload_config()
+
+    # First index right away, under the shared writer lock.
+    from indexer.embedder import Embedder as _Embedder
+    from indexer.lockfile import index_lock
+    from indexer.pipeline import Pipeline as _Pipeline
+    from indexer.store import Store as _Store
+
+    with index_lock() as acquired:
+        if not acquired:
+            return _dump({
+                "registered": slug,
+                "updated_existing": existed,
+                "indexed": False,
+                "note": "Another sync is running; the background sync will index "
+                        "this project within 30 minutes, or call sync_index shortly.",
+            })
+        store = _Store(cfg)
+        store.verify()
+        with _Embedder(cfg.embedding) as embedder:
+            embedder.health()
+            stats = _Pipeline(cfg).index_project(
+                cfg.projects[slug], store, embedder, only_changed=True
+            )
+
+    return _dump({
+        "registered": slug,
+        "updated_existing": existed,
+        "root": str(root_path),
+        "files_indexed": stats.files_indexed,
+        "chunks": stats.chunks,
+        "secrets_redacted": stats.secrets_redacted,
+        "failed": stats.files_failed,
+        "note": f"Knowledge base ready. Use project='{slug}' with search_code/"
+                f"search_docs/store_memory/get_briefing. Background sync keeps "
+                f"it current from here.",
     })
 
 

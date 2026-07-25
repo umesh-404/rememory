@@ -156,7 +156,13 @@ class Pipeline:
 
         task = progress.add_task(f"[cyan]{project.name}", total=len(files)) if progress else None
 
+        from .lockfile import heartbeat
+
         for disc in files:
+            # Keep the writer lock visibly alive: its staleness window is
+            # short (holder-death detection), so a long-running index must
+            # refresh it or a concurrent starter would steal it mid-run.
+            heartbeat()
             if progress:
                 progress.update(task, advance=1, description=f"[cyan]{project.name}[/] {disc.rel_path[:52]}")  # noqa: E501
 
