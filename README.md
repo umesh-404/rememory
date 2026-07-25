@@ -1,5 +1,9 @@
 # rememory
 
+[![CI](https://github.com/umesh-404/rememory/actions/workflows/ci.yml/badge.svg)](https://github.com/umesh-404/rememory/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+
 **Local, private, zero-cloud development memory for AI coding assistants.**
 
 rememory gives your AI assistant long-term memory across sessions and
@@ -274,14 +278,20 @@ demand. Two layers cover the exceptions:
   itself: you just see `rememory: starting the local database... ready.` in
   the log. Most "it isn't running" cases fix themselves this way.
 - **Start-menu shortcuts** (Windows, created by setup): search the Start
-  menu for **"Start rememory"**, **"Stop rememory"**, or **"rememory
-  Status"**. Each opens a small plain-language window — Start brings up
+  menu for **"Start rememory"**, **"Stop rememory"**, **"rememory Status"**,
+  or **"Repair rememory"**. Each opens a small plain-language window — Start brings up
   Docker and the whole stack, Stop shuts down rememory's own pieces (leaving
   Docker Desktop and Ollama alone, since other apps may use them), Status
   shows a green/yellow health list and what's indexed.
 
 On macOS/Linux the equivalents are `docker compose -f docker/compose.yml
 up -d` / `stop`, and `uv run -m indexer.cli status`.
+
+**If anything ever breaks** — weeks later, after an OS update, whatever —
+use the **"Repair rememory"** Start-menu shortcut (or re-run `setup.ps1` /
+`./setup.sh`). Every setup step is idempotent and self-verifying, so repair
+rebuilds exactly what's broken while leaving your memories, index and
+settings untouched — and it takes a safety backup of your memories first.
 
 ## Day-to-day commands
 
@@ -334,6 +344,8 @@ claude mcp remove --scope user rememory       # if you registered Claude Code
 # Windows also:
 schtasks /Delete /TN RememorySync /F
 schtasks /Delete /TN RememoryBackup /F
+# and remove the Start-menu folder:
+#   %AppData%\Microsoft\Windows\Start Menu\Programsememory
 # then delete the repo folder (data/ holds your memories -- export first!)
 ```
 

@@ -53,7 +53,9 @@ ok "reranker model ready (Qwen3-Reranker-0.6B)"
 
 step "Starting the vector database (Qdrant in Docker, data stays in $ROOT/data)"
 mkdir -p data/qdrant/storage data/qdrant/snapshots data/logs data/backups
-docker compose -f docker/compose.yml up -d || fail "docker compose failed."
+if ! docker compose -f docker/compose.yml up -d; then
+  command -v docker-compose >/dev/null && docker-compose -f docker/compose.yml up -d || fail "docker compose failed."
+fi
 info "waiting for Qdrant to become ready..."
 for i in $(seq 1 30); do
   curl -sf http://127.0.0.1:6333/readyz >/dev/null && break

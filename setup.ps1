@@ -53,10 +53,24 @@ Ok "ollama running"
 Step "Ensuring uv (Python toolchain manager)"
 $Uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
 if (-not $Uv) {
-    Info "uv not found -- installing via winget..."
-    winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements --disable-interactivity
-    $env:Path += ";$env:LOCALAPPDATA\Microsoft\WinGet\Links"
-    $Uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
+    # Two install paths: winget (preferred) with the official installer script
+    # as fallback -- winget is missing or broken on plenty of machines
+    # (older Windows 10, corporate images, fresh accounts).
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Info "uv not found -- installing via winget..."
+        winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements --disable-interactivity
+        $env:Path += ";$env:LOCALAPPDATA\Microsoft\WinGet\Links"
+        $Uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
+    }
+    if (-not $Uv) {
+        Info "installing uv via the official installer..."
+        try {
+            Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
+        } catch { Fail "Could not download the uv installer. Check your internet connection and re-run." }
+        $env:Path += ";$env:USERPROFILE\.local\bin"
+        $Uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
+        if (-not $Uv -and (Test-Path "$env:USERPROFILE\.local\bin\uv.exe")) { $Uv = "$env:USERPROFILE\.local\bin\uv.exe" }
+    }
     if (-not $Uv) { Fail "uv installed but not yet on PATH. Open a NEW terminal and re-run setup.ps1." }
 }
 Ok "uv at $Uv"
@@ -73,8 +87,16 @@ Ok "reranker model ready (Qwen3-Reranker-0.6B)"
 # ---------------------------------------------------------------------------
 Step "Starting the vector database (Qdrant in Docker, data stays in $Root\data)"
 New-Item -ItemType Directory -Force "$Root\data\qdrant\storage", "$Root\data\qdrant\snapshots", "$Root\data\logs", "$Root\data\backups" | Out-Null
+# `docker compose` (plugin) with `docker-compose` (standalone) as fallback --
+# older Docker installs only have the hyphenated binary.
 docker compose -f "$Root\docker\compose.yml" up -d
-if ($LASTEXITCODE -ne 0) { Fail "docker compose failed -- see output above." }
+if ($LASTEXITCODE -ne 0) {
+    if (Get-Command docker-compose -ErrorAction SilentlyContinue) {
+        Info "falling back to docker-compose..."
+        docker-compose -f "$Root\docker\compose.yml" up -d
+    }
+    if ($LASTEXITCODE -ne 0) { Fail "docker compose failed -- see output above." }
+}
 Info "waiting for Qdrant to become ready..."
 $ready = $false
 foreach ($i in 1..30) {
@@ -115,8 +137,20 @@ Info "seeding example memories (skips quietly if already seeded)..."
 & $Uv run scripts/seed_memories.py
 Info "registering background tasks (sync every 30 min, backup daily 12:00)..."
 schtasks /Create /TN "RememorySync" /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Root\scripts\sync.ps1`"" /SC MINUTE /MO 30 /F | Out-Null
+$syncOk = ($LASTEXITCODE -eq 0)
 schtasks /Create /TN "RememoryBackup" /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Root\scripts\backup.ps1`"" /SC DAILY /ST 12:00 /F | Out-Null
-Ok "index built; RememorySync + RememoryBackup registered"
+if ($syncOk -and $LASTEXITCODE -eq 0) {
+    Ok "index built; RememorySync + RememoryBackup registered"
+}
+else {
+    # Non-fatal: some locked-down machines block Task Scheduler. rememory
+    # still works -- the assistant's sync_index tool and manual `uv run -m
+    # indexer.cli sync` cover freshness; only the automation is missing.
+    Ok "index built"
+    Write-Host "      [!] could not register scheduled tasks (blocked on this machine?)." -ForegroundColor Yellow
+    Write-Host "      rememory still works; run 'uv run -m indexer.cli sync' occasionally," -ForegroundColor Yellow
+    Write-Host "      or let the assistant call sync_index after it writes files." -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------------------
 Step "Verifying the installation (test suite)"
@@ -134,7 +168,8 @@ $Shell = New-Object -ComObject WScript.Shell
 $shortcuts = @(
     @{ Name = "Start rememory";  Script = "start-rememory.ps1" },
     @{ Name = "Stop rememory";   Script = "stop-rememory.ps1" },
-    @{ Name = "rememory Status"; Script = "rememory-status.ps1" }
+    @{ Name = "rememory Status"; Script = "rememory-status.ps1" },
+    @{ Name = "Repair rememory"; Script = "repair-rememory.ps1" }
 )
 foreach ($s in $shortcuts) {
     $lnk = $Shell.CreateShortcut((Join-Path $MenuDir "$($s.Name).lnk"))
