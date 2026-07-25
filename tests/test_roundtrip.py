@@ -31,9 +31,31 @@ import httpx
 import yaml
 from qdrant_client import QdrantClient, models
 
-from indexer.runtime import qdrant_url
-
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
+
+
+def qdrant_url() -> str:
+    """Read the chosen port without importing the package.
+
+    This script runs in its OWN uv environment (see the inline dependency
+    block above) so that it works on a fresh clone before anything is
+    installed -- which also means it cannot import indexer.runtime. It reads
+    the same config/runtime.json, with the same defaults.
+    """
+    import json as _json
+    import os as _os
+
+    port = 6333
+    path = CONFIG_DIR / "runtime.json"
+    if path.exists():
+        try:
+            port = int(_json.loads(path.read_text(encoding="utf-8")).get("qdrant_port", 6333))
+        except (ValueError, OSError, TypeError):
+            port = 6333
+    env = _os.environ.get("REMEMORY_QDRANT_PORT")
+    if env and env.isdigit():
+        port = int(env)
+    return f"http://127.0.0.1:{port}"
 COLLECTION = "code"  # derived + disposable, so a test can safely write here
 
 # Two projects, so we can prove the filter separates them.

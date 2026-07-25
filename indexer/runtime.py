@@ -93,14 +93,21 @@ def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
 
 def port_is_ours(port: int) -> bool:
     """True if the port is busy but it's OUR Qdrant already running -- a
-    restarted setup must not treat its own healthy container as a conflict."""
+    restarted setup must not treat its own healthy container as a conflict.
+
+    Catches Exception deliberately: a port held by a NON-HTTP service (a gRPC
+    endpoint, a database, anything speaking a binary protocol) makes urllib
+    raise http.client.BadStatusLine, which is not an OSError. Letting that
+    escape crashed setup on exactly the machines this function exists to
+    support -- the ones where something else already owns the port.
+    """
     import urllib.request
 
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/collections", timeout=2) as r:
             body = r.read(400).decode("utf-8", "replace")
         return '"collections"' in body
-    except OSError:
+    except Exception:
         return False
 
 

@@ -89,8 +89,12 @@ Step "Choosing ports (avoids clashes with anything already running)"
 $portJson = & $Uv run --directory $Root python -c @"
 import json,sys
 sys.path.insert(0, r'$Root')
-from indexer.runtime import pick_free_port, save_runtime, port_is_ours
-http = pick_free_port(6333); grpc = pick_free_port(6334)
+from indexer.runtime import pick_free_port, save_runtime, port_is_ours, runtime
+http = pick_free_port(6333)
+# If our own Qdrant already holds the HTTP port, its gRPC port belongs to the
+# same container -- probing it separately would see a busy non-HTTP port and
+# needlessly move gRPC on every re-run.
+grpc = runtime()['qdrant_grpc_port'] if (http and port_is_ours(http)) else pick_free_port(6334)
 if http is None or grpc is None:
     print('{\"error\":\"no free port\"}')
 else:
@@ -198,7 +202,7 @@ if (Test-Path $legacy) { Remove-Item $legacy -Recurse -Force -ErrorAction Silent
 
 # A real icon, generated from the same code that draws the tray icon --
 # otherwise the shortcut inherits uv.exe's icon.
-$IconPath = Join-Path $Root "dataememory.ico"
+$IconPath = Join-Path (Join-Path $Root "data") "rememory.ico"
 & $Uv run --extra app --directory $Root python -c "from app.icon import write_ico; write_ico(r'$IconPath')" 2>$null | Out-Null
 
 $Shell = New-Object -ComObject WScript.Shell
