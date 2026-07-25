@@ -322,9 +322,10 @@ On macOS/Linux, launch the same app with `uv run --extra app -m app.main`.
 
 **If anything ever breaks** — weeks later, after an OS update, whatever —
 use **Repair** in the app (Overview -> Quick actions, or the tray menu), or
-re-run `setup.ps1` / `./setup.sh`. Every setup step is idempotent and self-verifying, so repair
-rebuilds exactly what's broken while leaving your memories, index and
-settings untouched — and it takes a safety backup of your memories first.
+re-run `setup.ps1` / `./setup.sh`. Every setup step is idempotent and
+self-verifying, so repair rebuilds exactly what's broken while leaving your
+memories, index and settings untouched -- and it takes a safety backup of
+your memories first.
 
 ## Day-to-day commands
 
