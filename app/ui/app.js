@@ -102,14 +102,22 @@ async function refreshStatus(showToast = false) {
     mdl.loaded ? `Ready · ${mdl.loaded}/${mdl.total} loaded` : "Ready (idle)",
     st.services.ollama ? "Models missing" : "Ollama offline");
 
+  // null means "could not check", which is not the same as "not scheduled" --
+  // reporting a missing task would send the user off repairing something fine.
   const tasks = st.tasks || {};
   const taskKeys = Object.keys(tasks);
-  const tasksOk = taskKeys.length > 0 && taskKeys.every((k) => tasks[k]);
+  const unknown = taskKeys.some((k) => tasks[k] === null);
+  const tasksOk = taskKeys.length > 0 && taskKeys.every((k) => tasks[k] === true);
   const card = $('.service[data-svc="automation"]');
-  card.querySelector(".dot").className =
-    `dot ${taskKeys.length === 0 ? "dot-warn" : tasksOk ? "dot-ok" : "dot-warn"}`;
-  card.querySelector(".svc-state").textContent =
-    taskKeys.length === 0 ? "Manual" : tasksOk ? "Scheduled" : "Partly set up";
+  let dot = "dot-warn";
+  let label = "Manual";
+  if (taskKeys.length > 0) {
+    if (tasksOk) { dot = "dot-ok"; label = "Scheduled"; }
+    else if (unknown) { dot = "dot-idle"; label = "Unknown"; }
+    else { label = "Partly set up"; }
+  }
+  card.querySelector(".dot").className = `dot ${dot}`;
+  card.querySelector(".svc-state").textContent = label;
 
   const c = st.collections || {};
   $("#statCode").textContent = (c.code ?? 0).toLocaleString();

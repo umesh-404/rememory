@@ -109,8 +109,45 @@ def _err(message: str, **extra) -> dict:
 class Api:
     """Exposed to JavaScript as `pywebview.api.*` and used by the tray menu."""
 
+    # Scheduled-task registration changes only when setup or repair runs, but
+    # status() is polled every 15 seconds by the tray. Querying it each time
+    # spawned two schtasks.exe processes per poll -- thousands a day -- and on
+    # a machine under memory pressure Windows eventually refuses to start
+    # them, raising a modal "unable to start correctly (0xc000012d)"
+    # (STATUS_COMMITMENT_LIMIT) over the dashboard. Cache it.
+    _TASKS_TTL_SECONDS = 600
+
     def __init__(self) -> None:
         self._window = None  # set by window.py once the window exists
+        self._tasks_cache: dict | None = None
+        self._tasks_checked_at = 0.0
+        self._version_cache: dict | None = None
+
+    def _scheduled_tasks(self, force: bool = False) -> dict:
+        """Which background tasks are registered, cached for _TASKS_TTL_SECONDS.
+
+        A task whose query could not even be launched is reported as None
+        ("unknown"), not False: failing to start schtasks.exe says nothing
+        about whether the task exists, and showing "not scheduled" would send
+        the user off repairing something that is fine.
+        """
+        if not IS_WINDOWS:
+            return {}
+        now = time.time()
+        if (
+            not force
+            and self._tasks_cache is not None
+            and now - self._tasks_checked_at < self._TASKS_TTL_SECONDS
+        ):
+            return self._tasks_cache
+
+        tasks: dict = {}
+        for task in ("RememorySync", "RememoryBackup"):
+            r = _run(["schtasks", "/Query", "/TN", task], timeout=8)
+            tasks[task] = None if r is None else (r.returncode == 0)
+        self._tasks_cache = tasks
+        self._tasks_checked_at = now
+        return tasks
 
     def bind_window(self, window) -> None:
         self._window = window
@@ -118,10 +155,23 @@ class Api:
     # ------------------------------------------------------------ status
     def status(self) -> dict:
         """Everything the Overview tab shows. Cheap enough to poll."""
-        docker = _run(["docker", "info", "--format", "ok"], timeout=8)
-        docker_up = bool(docker and docker.returncode == 0)
-
         qdrant_up = _get_json(f"{QDRANT}/collections") is not None
+
+        # Ask the database first, and only shell out to docker when it is
+        # unreachable. `docker info` is a heavyweight process launch, and this
+        # runs on a 15-second poll; skipping it in the common case (everything
+        # running) removes thousands of process spawns a day.
+        #
+        # It also removes a contradiction the UI used to show: if the docker
+        # CLI failed to *launch*, docker_up went False while the database card
+        # said Running, so the dashboard reported Docker down and Qdrant up at
+        # the same time. A reachable database means its container is running,
+        # which means Docker is running.
+        if qdrant_up:
+            docker_up = True
+        else:
+            docker = _run(["docker", "info", "--format", "ok"], timeout=8)
+            docker_up = bool(docker and docker.returncode == 0)
         ollama = _get_json(f"{OLLAMA}/api/tags")
         ollama_up = ollama is not None
 
@@ -139,11 +189,7 @@ class Api:
                     (info or {}).get("result", {}).get("points_count", 0) if info else 0
                 )
 
-        tasks = {}
-        if IS_WINDOWS:
-            for task in ("RememorySync", "RememoryBackup"):
-                r = _run(["schtasks", "/Query", "/TN", task], timeout=8)
-                tasks[task] = bool(r and r.returncode == 0)
+        tasks = self._scheduled_tasks()
 
         loaded = self._loaded_models() if ollama_up else []
         ours = self._our_models()
@@ -171,11 +217,23 @@ class Api:
         }
 
     def _version(self) -> dict:
+        """Installed commit, cached for the life of the process.
+
+        This is shown under the sidebar brand and cannot change while the app
+        runs: applying an update restarts it. Re-running `git log` on every
+        15-second status poll was one more needless process launch.
+        """
+        if self._version_cache is not None:
+            return self._version_cache
         r = _run(["git", "log", "-1", "--format=%h|%cs|%s"], timeout=8)
         if r and r.returncode == 0 and r.stdout.strip():
             h, date, subject = (r.stdout.strip().split("|", 2) + ["", ""])[:3]
-            return {"commit": h, "date": date, "subject": subject}
-        return {"commit": "unknown", "date": "", "subject": ""}
+            self._version_cache = {"commit": h, "date": date, "subject": subject}
+        else:
+            # Not cached: a missing answer here is usually git still warming
+            # up or absent from PATH, and it costs nothing to try again later.
+            return {"commit": "unknown", "date": "", "subject": ""}
+        return self._version_cache
 
     # ------------------------------------------------------- stack control
     def start_stack(self) -> dict:

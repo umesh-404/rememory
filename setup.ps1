@@ -287,14 +287,10 @@ else {
 }
 
 # ---------------------------------------------------------------------------
-Step "Verifying the installation (test suite)"
-& $Uv run tests/test_unit.py
-if ($LASTEXITCODE -ne 0) { Fail "unit tests failed." }
-& $Uv run tests/test_roundtrip.py
-if ($LASTEXITCODE -ne 0) { Fail "end-to-end round trip failed." }
-Ok "all verification tests passed"
-
-# ---------------------------------------------------------------------------
+# The shortcut is created BEFORE the test suite on purpose. Verification ends
+# the run with a hard Fail, so when it was last, any test hiccup left a fully
+# working install with no way to launch it from the Start menu. Installing
+# first means the app is always there; the tests still get the final word.
 Step "Creating the Start-menu shortcut"
 # ONE shortcut: the app itself. Start / Stop / Status / Repair all live
 # inside it (tray menu and dashboard), so separate script shortcuts would
@@ -342,6 +338,15 @@ if (Test-Path $IconPath) { $lnk.IconLocation = $IconPath }
 $lnk.Save()
 if (Test-Path $Pythonw) { Ok "Start-menu shortcut created (search: rememory)" }
 else { Ok "Start-menu shortcut created (via uv -- desktop extra was not installed)" }
+
+# ---------------------------------------------------------------------------
+Step "Verifying the installation (test suite)"
+& $Uv run tests/test_unit.py
+if ($LASTEXITCODE -ne 0) { Fail "unit tests failed." }
+& $Uv run tests/test_roundtrip.py
+if ($LASTEXITCODE -ne 0) { Fail "end-to-end round trip failed." }
+Ok "all verification tests passed"
+
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "Setup complete." -ForegroundColor Green
