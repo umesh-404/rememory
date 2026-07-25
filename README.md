@@ -345,7 +345,7 @@ claude mcp remove --scope user rememory       # if you registered Claude Code
 schtasks /Delete /TN RememorySync /F
 schtasks /Delete /TN RememoryBackup /F
 # and remove the Start-menu folder:
-#   %AppData%\Microsoft\Windows\Start Menu\Programsememory
+#   %AppData%/Microsoft/Windows/Start Menu/Programs/rememory
 # then delete the repo folder (data/ holds your memories -- export first!)
 ```
 
