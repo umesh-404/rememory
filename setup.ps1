@@ -449,9 +449,29 @@ Step "Background automation"
 Info "seeding example memories (skips quietly if already seeded)..."
 & $Uv run scripts/seed_memories.py
 Info "registering background tasks (sync every 30 min, backup daily 12:00)..."
-schtasks /Create /TN "RememorySync" /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Root\scripts\sync.ps1`"" /SC MINUTE /MO 30 /F | Out-Null
+# Run the jobs with pythonw.exe, NOT powershell.exe.
+#
+# `powershell -WindowStyle Hidden` is applied by PowerShell itself, after the
+# process has already started, so Task Scheduler still flashed a console window
+# on screen every 30 minutes. Black windows appearing and vanishing for no
+# visible reason is alarming -- it looks like malware.
+#
+# pythonw.exe is a GUI-subsystem binary: Windows never gives it a console, so
+# there is nothing to flash. scripts/scheduled.py carries the same logging and
+# service-down guards the .ps1 files had.
+$TaskPythonw = Join-Path $Root ".venv\Scripts\pythonw.exe"
+if (Test-Path $TaskPythonw) {
+    $syncCmd = "`"$TaskPythonw`" `"$Root\scripts\scheduled.py`" sync"
+    $backupCmd = "`"$TaskPythonw`" `"$Root\scripts\scheduled.py`" backup"
+} else {
+    # No venv (desktop extra skipped / sync failed): fall back to the old host
+    # so automation still exists, accepting the window flash.
+    $syncCmd = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Root\scripts\sync.ps1`""
+    $backupCmd = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Root\scripts\backup.ps1`""
+}
+schtasks /Create /TN "RememorySync" /TR $syncCmd /SC MINUTE /MO 30 /F | Out-Null
 $syncOk = ($LASTEXITCODE -eq 0)
-schtasks /Create /TN "RememoryBackup" /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Root\scripts\backup.ps1`"" /SC DAILY /ST 12:00 /F | Out-Null
+schtasks /Create /TN "RememoryBackup" /TR $backupCmd /SC DAILY /ST 12:00 /F | Out-Null
 if ($syncOk -and $LASTEXITCODE -eq 0) {
     Ok "RememorySync + RememoryBackup registered"
 }

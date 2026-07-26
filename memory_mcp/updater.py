@@ -41,6 +41,8 @@ ROOT = Path(__file__).resolve().parent.parent
 MARKER = ROOT / "data" / ".last-update-check"
 THROTTLE_MINUTES = 15
 GIT_TIMEOUT = 8  # seconds; a slow network must not stall session startup
+# Suppress the console window Windows creates for child processes.
+_NO_WINDOW = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 _REEXEC_FLAG = "REMEMORY_UPDATE_REEXEC"
 
 
@@ -70,6 +72,10 @@ def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
             text=True,
             timeout=GIT_TIMEOUT,
             check=False,
+            # No console window: this runs at MCP server startup, i.e. every
+            # time a client session begins, where a flashing black window is
+            # alarming and explains nothing.
+            **_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return None

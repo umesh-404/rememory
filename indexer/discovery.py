@@ -15,6 +15,7 @@ import fnmatch
 import hashlib
 import os
 import subprocess
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,10 @@ from pathlib import Path
 import pathspec
 
 from .config import Config, Project
+
+# Suppress the console window Windows would otherwise create for child
+# processes. Everything here runs from background jobs and GUI processes.
+_NO_WINDOW = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 
 @dataclass(frozen=True)
@@ -232,6 +237,11 @@ def git_commit(root: Path) -> str | None:
             text=True,
             timeout=10,
             check=False,
+            # Without CREATE_NO_WINDOW, Windows gives this child its own console
+            # window. It is called once per project on every sync -- including
+            # the scheduled one every 30 minutes -- so a console flashed on
+            # screen and vanished, repeatedly, for no visible reason.
+            **_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return None
