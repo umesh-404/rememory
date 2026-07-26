@@ -34,6 +34,34 @@ UPDATE_CHECK_SECONDS = 6 * 60 * 60
 _NO_WINDOW = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 
+def hide_own_console() -> None:
+    """Hide the console window this process was given, if any.
+
+    Even launched through the venv's pythonw.exe, a console can still appear:
+    uv's pythonw.exe is a trampoline that re-execs the console-subsystem base
+    interpreter, and that child gets a console window. Explorer titles and
+    icons it from the shortcut, so it shows up as an empty black window called
+    "rememory" that looks like a broken dashboard -- and clicking in it puts
+    the console into QuickEdit selection mode, which freezes the process at
+    its next write to stdout.
+
+    Hiding rather than calling FreeConsole deliberately: the console stays
+    attached so stdout/stderr writes keep working (and keep going nowhere
+    visible), which is exactly what a background app wants. Freeing it would
+    invalidate the streams and risk breaking any later print().
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+    except Exception:
+        pass  # cosmetic only -- never prevent the app from starting
+
+
 def _windowless_python() -> str:
     """Interpreter to spawn children with -- pythonw.exe where it exists.
 
@@ -278,6 +306,7 @@ def _signal_running_instance() -> bool:
 
 
 def main() -> int:
+    hide_own_console()  # before anything slow, so no black window ever flashes
     lock = _acquire_single_instance()
     if lock is None:
         _signal_running_instance()
