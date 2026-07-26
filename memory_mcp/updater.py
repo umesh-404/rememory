@@ -43,6 +43,23 @@ THROTTLE_MINUTES = 15
 GIT_TIMEOUT = 8  # seconds; a slow network must not stall session startup
 # Suppress the console window Windows creates for child processes.
 _NO_WINDOW = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+
+
+def _uv() -> str:
+    """Absolute uv path -- an MCP server is launched without a shell profile."""
+    import shutil
+
+    found = shutil.which("uv")
+    if found:
+        return found
+    for candidate in (
+        Path.home() / "AppData/Local/Microsoft/WinGet/Links/uv.exe",
+        Path.home() / ".local/bin/uv.exe",
+        Path.home() / ".local/bin/uv",
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return "uv"
 _REEXEC_FLAG = "REMEMORY_UPDATE_REEXEC"
 
 
@@ -131,12 +148,35 @@ def maybe_update() -> None:
         return
 
     _bar(0.3)
+    before = _git("rev-parse", "HEAD")
+    old_head = before.stdout.strip() if before and before.returncode == 0 else ""
     pulled = _git("merge", "--ff-only", f"origin/{branch}")
     if pulled is None or pulled.returncode != 0:
         _bar_end()
         _log("update skipped (histories diverged -- run: git pull --rebase)")
         return
     _bar(0.8)
+
+    # If the update changed dependencies, install them BEFORE re-exec.
+    #
+    # The re-exec below runs sys.executable directly, not `uv run`, so nothing
+    # else would install them: the freshly pulled code would start against the
+    # old virtualenv and die on ImportError, taking the server down mid-session.
+    if old_head:
+        changed = _git("diff", "--name-only", old_head, "HEAD")
+        touched = (changed.stdout if changed and changed.returncode == 0 else "")
+        if "uv.lock" in touched or "pyproject.toml" in touched:
+            _log("dependencies changed -- installing")
+            try:
+                subprocess.run(
+                    [_uv(), "sync", "--directory", str(ROOT)],
+                    capture_output=True, text=True, timeout=600,
+                    check=False, **_NO_WINDOW,
+                )
+            except (OSError, subprocess.SubprocessError):
+                # Non-fatal: the next `uv run` launch still fixes it, and
+                # saying so beats a silent ImportError after the restart.
+                _log("could not install new dependencies; restart rememory if it misbehaves")
     _bar(1.0)
     _bar_end()
     _log(f"updated successfully ({version})")
