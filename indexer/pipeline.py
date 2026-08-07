@@ -70,7 +70,11 @@ class Pipeline:
         if disc.chunker == "docs":
             return self.docs_chunker.chunk(source), False
 
-        return self._fallback(source), False
+        # A `code` file with no tree-sitter grammar configured also line-window
+        # chunks -- count it as a fallback parse so the stat stays honest if
+        # such a mapping is ever added. Plain text/config files are not
+        # fallbacks; line windows are their intended chunking.
+        return self._fallback(source), disc.chunker == "code"
 
     def _fallback(self, source: str) -> list[Chunk]:
         return chunk_text(

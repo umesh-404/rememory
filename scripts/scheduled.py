@@ -36,6 +36,33 @@ NO_WINDOW = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 MAX_LOG_BYTES = 1_000_000
 
 
+def hide_own_console() -> None:
+    """Hide the console window this process was given, if any.
+
+    The docstring above says pythonw.exe never gets a console -- that is true
+    of the *base* interpreter's pythonw.exe, but the venv's pythonw.exe is a
+    uv trampoline that re-launches the console-subsystem interpreter, and that
+    child allocates a visible console window for the whole job: a black
+    python.exe window appearing every 30 minutes for no visible reason.
+    setup.ps1 now registers the task against the base pythonw.exe, where no
+    console ever exists; this hide covers installs whose task still points at
+    the venv trampoline (tasks are only re-registered by re-running setup).
+
+    Same technique as app/main.py:hide_own_console -- hiding, not FreeConsole,
+    so stdout/stderr writes keep working (and keep going nowhere visible).
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+    except Exception:
+        pass  # cosmetic only -- never prevent the job from running
+
+
 def log(name: str, message: str) -> None:
     LOGS.mkdir(parents=True, exist_ok=True)
     path = LOGS / f"{name}.log"
@@ -117,6 +144,7 @@ def run_job(name: str, args: list[str], keep: str) -> int:
 
 
 def main() -> int:
+    hide_own_console()  # before anything slow, so no black window lingers
     job = sys.argv[1] if len(sys.argv) > 1 else ""
     if job == "sync":
         return run_job("sync", ["-m", "indexer.cli", "sync"], keep="chunks")

@@ -29,6 +29,8 @@ jobs:
       - name: Lint
         run: uv run ruff check .
       - name: Byte-compile everything
-        run: uv run python -m compileall -q indexer memory_mcp scripts tests
+        # app/ is included even though its extra isn't installed -- compileall
+        # checks syntax without importing, so pywebview/pystray aren't needed.
+        run: uv run python -m compileall -q app indexer memory_mcp scripts tests
       - name: Unit tests (service-free)
         run: uv run tests/test_unit.py

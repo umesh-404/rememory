@@ -19,4 +19,6 @@ Module map:
     server.py    FastMCP wiring: tool definitions and descriptions
 """
 
+# Kept in lockstep with pyproject.toml [project] version -- two disagreeing
+# version stamps are worse than none.
 __version__ = "0.5.0"

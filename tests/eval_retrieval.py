@@ -2,15 +2,23 @@
 
 The Phase 2 benchmark measured the raw embedding model. This measures what
 Claude actually experiences: discovery -> chunking -> hybrid RRF -> reranking,
-over the real indexed corpus, scored against the golden set in
+over a real indexed corpus, scored against the golden set in
 config/eval.yaml. Runs the same queries twice -- with and without the
 reranker -- so the second stage has to prove its keep with numbers.
+
+The corpus is this repo itself, indexed EPHEMERALLY under the reserved
+project name "rememory-eval". rememory deliberately does not register or
+index its own source (it would pollute user search results), and the MCP
+tools validate `project` against the registry -- so the eval corpus is
+invisible to every tool, and the eval no longer depends on any particular
+machine's registered projects. Indexing is incremental, so re-runs while
+tuning cost seconds, not minutes. Remove the corpus with --cleanup.
 
 Metrics (industry-standard minimum):
   Recall@1 / Recall@3  -- is the right file the top hit / in the top 3?
   MRR                  -- how far down does the right file sit on average?
 
-    uv run --directory D:\\memory-system tests/eval_retrieval.py
+    uv run tests/eval_retrieval.py [--cleanup]
 """
 
 from __future__ import annotations
@@ -21,8 +29,42 @@ from pathlib import Path
 
 import yaml
 
-from indexer.config import load_config
+from indexer.config import Project, load_config
 from memory_mcp.search import Searcher
+
+ROOT = Path(__file__).resolve().parent.parent
+EVAL_PROJECT = "rememory-eval"
+
+
+def ensure_eval_index(cfg) -> None:
+    """Index this repo under the reserved eval project (incremental)."""
+    from indexer.embedder import Embedder
+    from indexer.lockfile import index_lock
+    from indexer.pipeline import Pipeline
+    from indexer.store import Store
+
+    proj = Project(name=EVAL_PROJECT, root=ROOT,
+                   description="ephemeral corpus for the retrieval scoreboard")
+    store = Store(cfg)
+    store.verify()
+    with index_lock() as acquired:
+        if not acquired:
+            raise SystemExit("another index/sync is running -- retry in a minute")
+        with Embedder(cfg.embedding) as embedder:
+            embedder.health()
+            stats = Pipeline(cfg).index_project(proj, store, embedder, only_changed=True)
+    print(f"eval corpus: {stats.files_indexed} files indexed, "
+          f"{stats.files_skipped_unchanged} unchanged "
+          f"(project '{EVAL_PROJECT}', hidden from MCP tools)")
+
+
+def cleanup_eval_index(cfg) -> None:
+    from indexer.store import Store
+
+    store = Store(cfg)
+    for coll in ("code", "docs"):
+        store.delete_project(coll, EVAL_PROJECT)
+    print(f"removed the '{EVAL_PROJECT}' corpus from code and docs")
 
 
 def evaluate(searcher: Searcher, cases: list[dict], *, rerank: bool) -> dict:
@@ -63,11 +105,14 @@ def evaluate(searcher: Searcher, cases: list[dict], *, rerank: bool) -> dict:
 
 def main() -> int:
     cfg = load_config()
+    if "--cleanup" in sys.argv[1:]:
+        cleanup_eval_index(cfg)
+        return 0
     golden = yaml.safe_load(
-        (Path(__file__).resolve().parent.parent / "config" / "eval.yaml").read_text(
-            encoding="utf-8"
-        )
+        (ROOT / "config" / "eval.yaml").read_text(encoding="utf-8")
     )["queries"]
+    if any(case["project"] == EVAL_PROJECT for case in golden):
+        ensure_eval_index(cfg)
     searcher = Searcher(cfg)
 
     print(f"{len(golden)} golden queries against the live index\n")

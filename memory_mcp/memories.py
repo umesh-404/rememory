@@ -170,8 +170,11 @@ class MemoryStore:
         replacement = self.store(
             project=p["project"],
             memory_type=p["memory_type"],
-            title=title or p["title"],
-            content=content or p["content"],
+            # `is not None`, not `or`: an explicitly-passed empty string should
+            # reach validation (and be rejected with a clear message), not
+            # silently keep the old value.
+            title=title if title is not None else p["title"],
+            content=content if content is not None else p["content"],
             tags=tags if tags is not None else p.get("tags"),
             supersedes=memory_id,
         )
@@ -206,7 +209,9 @@ class MemoryStore:
         include_superseded: bool = False,
         limit: int = 30,
         offset: int = 0,
-    ) -> list[dict[str, Any]]:
+        with_page: bool = False,
+        full_content: bool = False,
+    ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], dict[str, Any]]:
         conditions: list[models.FieldCondition] = []
         if project:
             conditions.append(
@@ -235,7 +240,10 @@ class MemoryStore:
             with_payload=True,
             with_vectors=False,
         )
-        self.last_page = {
+        # Returned alongside the items (with_page=True) rather than stashed on
+        # self: a mutable side channel on a shared store instance meant two
+        # overlapping list calls could hand one caller the other's pagination.
+        page = {
             "total": self.client.count(
                 collection_name=COLLECTION, count_filter=query_filter, exact=True
             ).count,
@@ -246,18 +254,23 @@ class MemoryStore:
         out = []
         for pt in points:
             p = pt.payload or {}
-            out.append(
-                {
-                    "id": str(pt.id),
-                    "title": p.get("title"),
-                    "memory_type": p.get("memory_type"),
-                    "project": p.get("project"),
-                    "tags": p.get("tags", []),
-                    "status": p.get("status"),
-                    "created_at": p.get("created_at"),
-                    "preview": (p.get("content") or "")[:160],
-                }
-            )
+            item = {
+                "id": str(pt.id),
+                "title": p.get("title"),
+                "memory_type": p.get("memory_type"),
+                "project": p.get("project"),
+                "tags": p.get("tags", []),
+                "status": p.get("status"),
+                "created_at": p.get("created_at"),
+                "preview": (p.get("content") or "")[:160],
+            }
+            if full_content:
+                # The payload is already in hand -- callers that need whole
+                # memories (the desktop app) get them without a _get() per row.
+                item["content"] = p.get("content") or ""
+            out.append(item)
+        if with_page:
+            return out, page
         return out
 
     # ---------------------------------------------------------------- helpers

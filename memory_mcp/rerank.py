@@ -105,17 +105,23 @@ class Reranker:
             )
 
     # ------------------------------------------------------------------ rerank
-    def rerank(self, query: str, results: list) -> list:
+    def rerank(self, query: str, results: list, pool_size: int | None = None) -> list:
         """Reorder SearchResults by cross-encoder score; annotate each result.
 
         Takes and returns the search layer's SearchResult objects. On any
         failure the input order (RRF) is returned untouched.
+
+        pool_size widens the scored window beyond `candidates` when the caller
+        will return more than `candidates` results -- otherwise the head of
+        the response would mix scored and unscored entries, and the tool
+        docstrings tell Claude to trust the scores.
         """
         if not self.enabled or self._dead or len(results) < 2:
             return results
 
-        pool = results[: self.candidates]
-        rest = results[self.candidates :]
+        window = max(self.candidates, pool_size or 0)
+        pool = results[:window]
+        rest = results[window:]
         started = time.perf_counter()
 
         def run_batch() -> list[float | None]:

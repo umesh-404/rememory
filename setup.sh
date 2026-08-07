@@ -92,6 +92,40 @@ ok "reranker model ready (Qwen3-Reranker-0.6B)"
 
 step "Starting the vector database (Qdrant in Docker, data stays in $ROOT/data)"
 mkdir -p data/qdrant/storage data/qdrant/snapshots data/logs data/backups
+# Remove any stale container from a failed run BEFORE choosing ports: a
+# crash-looping leftover holds its published port without ever answering the
+# ownership probe, so port picking would conclude something foreign owns the
+# port and walk Qdrant upward on every re-run (6333 -> 6335 -> 6337). All
+# data lives in the bind mount, so removing the container loses nothing.
+docker rm -f rememory-qdrant >/dev/null 2>&1 || true
+# Choose ports the way setup.ps1 does (this used to be Windows-only, leaving
+# a Unix machine with 6333 occupied to die on a raw compose bind error):
+# probe for a free-or-ours port, record it in config/runtime.json, and hand
+# it to compose through the environment. indexer/runtime.py is stdlib-only,
+# so --no-project works before the project environment exists.
+PORTS=$(uv run --no-project python - <<'PYEOF'
+from indexer.runtime import pick_free_port, runtime, save_runtime
+
+rt = runtime()
+http = pick_free_port(rt["qdrant_port"])
+if http is None:
+    raise SystemExit("no free port in the probe range")
+if http == rt["qdrant_port"]:
+    # Reuse the recorded gRPC port: probing it separately would see a busy
+    # non-HTTP port and move gRPC on every re-run.
+    grpc = rt["qdrant_grpc_port"]
+else:
+    grpc = pick_free_port(http + 1)
+    if grpc is None:
+        raise SystemExit("no free gRPC port in the probe range")
+save_runtime(qdrant_port=http, qdrant_grpc_port=grpc)
+print(http, grpc)
+PYEOF
+) || fail "Could not find a free port for the database (tried 6333-6353)."
+QPORT=$(echo "$PORTS" | awk '{print $1}')
+GPORT=$(echo "$PORTS" | awk '{print $2}')
+export REMEMORY_QDRANT_PORT="$QPORT" REMEMORY_QDRANT_GRPC_PORT="$GPORT"
+[ "$QPORT" = "6333" ] || info "using port $QPORT for the database (recorded in config/runtime.json)"
 # Pre-pull with retries: a still-settling Docker engine intermittently fails
 # image requests (500); a pause-and-retry rides it out.
 pulled=""
@@ -100,22 +134,11 @@ for attempt in 1 2 3; do
   [ "$attempt" -lt 3 ] && { info "image pull failed (attempt $attempt/3) -- retrying in 15s..."; sleep 15; }
 done
 [ -n "$pulled" ] || fail "Could not pull qdrant/qdrant:v1.18.3 -- if the error mentions a 500, restart Docker and re-run."
-# Remove any stale container from a failed run: it may hold the port and
-# crash-loop; all data lives in the bind mount, so this loses nothing.
-docker rm -f rememory-qdrant >/dev/null 2>&1 || true
 if ! docker compose -f docker/compose.yml up -d; then
   command -v docker-compose >/dev/null && docker-compose -f docker/compose.yml up -d || fail "docker compose failed."
 fi
-# Read the chosen port rather than assuming 6333: config/runtime.json is
-# written when a machine has to move Qdrant off a busy port, and hardcoding
-# the default made this script probe the wrong port and declare a healthy
-# database dead. --noproxy matters for the same reason it does in Python:
-# curl honours http_proxy, and a proxied loopback request always fails.
-QPORT=6333
-if [ -f config/runtime.json ]; then
-  QPORT=$(sed -n 's/.*"qdrant_port"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' config/runtime.json | head -1)
-  [ -n "$QPORT" ] || QPORT=6333
-fi
+# --noproxy matters for the same reason it does in Python: curl honours
+# http_proxy, and a proxied loopback request always fails.
 ready=""
 info "waiting for Qdrant to become ready (up to 60s)..."
 for i in $(seq 1 30); do

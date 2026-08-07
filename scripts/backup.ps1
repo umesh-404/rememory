@@ -10,10 +10,28 @@ if (-not $Uv) { $Uv = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\uv.exe" }
 $Log = Join-Path $Root 'data\logs\backup.log'
 New-Item -ItemType Directory -Force (Split-Path $Log) | Out-Null
 
-try {
-    Invoke-RestMethod 'http://127.0.0.1:6333/readyz' -TimeoutSec 3 | Out-Null
+# Port from config\runtime.json (REMEMORY_QDRANT_PORT wins), probed without
+# the system proxy -- same reasoning as sync.ps1 and setup.ps1. Hardcoding
+# 6333 made backups silently dead on machines where setup chose another port.
+$QdrantPort = 6333
+$RuntimeFile = Join-Path $Root 'config\runtime.json'
+if (Test-Path $RuntimeFile) {
+    try {
+        $rt = Get-Content $RuntimeFile -Raw | ConvertFrom-Json
+        if ($rt.qdrant_port) { $QdrantPort = [int]$rt.qdrant_port }
+    } catch {}
 }
-catch {
+if ($env:REMEMORY_QDRANT_PORT -match '^\d+$') { $QdrantPort = [int]$env:REMEMORY_QDRANT_PORT }
+
+$up = $false
+try {
+    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$QdrantPort/readyz")
+    $req.Timeout = 3000
+    $req.Proxy = $null
+    $req.GetResponse().Close()
+    $up = $true
+} catch {}
+if (-not $up) {
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  skipped: qdrant not reachable" |
         Add-Content $Log -Encoding utf8
     exit 0

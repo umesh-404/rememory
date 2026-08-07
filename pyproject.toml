@@ -1,6 +1,6 @@
 [project]
 name = "rememory"
-version = "0.4.0"
+version = "0.5.0"
 description = "rememory: local, private development memory for Claude Code (Qdrant + Ollama + MCP)"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }

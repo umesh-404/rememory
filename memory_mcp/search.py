@@ -160,9 +160,11 @@ class Searcher:
         results = [self._to_result(p) for p in points]
 
         # Stage 2: cross-encoder reranking (falls back to RRF order on any
-        # failure -- see rerank.py for the policy).
+        # failure -- see rerank.py for the policy). The scored window covers
+        # the full requested limit, so every result the caller receives
+        # carries a rerank score -- never a mixed scored/unscored list.
         if rerank:
-            results = self.reranker.rerank(query, results)
+            results = self.reranker.rerank(query, results, pool_size=limit)
 
         # Recency bias, memory collection only (the supermemory/Zep pattern):
         # when two memories are comparably relevant, the newer one should win
@@ -216,9 +218,14 @@ class Searcher:
             created = r.extra.get("updated_at") or r.extra.get("created_at")
             if created:
                 try:
-                    age_days = (now - datetime.fromisoformat(created)).days
+                    stamp = datetime.fromisoformat(created)
+                    if stamp.tzinfo is None:  # naive stamps would make the
+                        stamp = stamp.replace(tzinfo=UTC)  # subtraction raise
+                    age_days = (now - stamp).days
                     factor = 0.85 + 0.15 * math.exp(-max(age_days, 0) / 90)
-                except ValueError:
+                except (TypeError, ValueError):
+                    # A malformed or non-string stamp keeps the floor factor;
+                    # it must never escape into the tool call as a traceback.
                     pass
             scored.append((base * factor, pos, r))
         # pos as tiebreak keeps the sort stable for identical scores.

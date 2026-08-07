@@ -128,8 +128,11 @@ class Store:
                 **base_payload,
                 "project": project,
                 "source_path": rel_path,
-                # Stored verbatim -- the contextual header used for embedding is
-                # deliberately NOT included, so Claude reads back real file text.
+                # Stored as it was chunked -- the contextual header used for
+                # embedding is deliberately NOT included, so Claude reads back
+                # real file text. (Not quite verbatim: secrets were already
+                # replaced with [REDACTED] by indexer/redact.py, line counts
+                # preserved, before the text ever reached the chunker.)
                 "content": chunk.content,
                 "start_line": chunk.start_line,
                 "end_line": chunk.end_line,

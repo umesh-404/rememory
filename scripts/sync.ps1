@@ -20,11 +20,37 @@ function Write-Log([string]$msg) {
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg" | Add-Content -Path $Log -Encoding utf8
 }
 
-try {
-    Invoke-RestMethod 'http://127.0.0.1:6333/readyz' -TimeoutSec 3 | Out-Null
-    Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 3 | Out-Null
+# Ports come from config\runtime.json (written by setup), REMEMORY_* env vars
+# taking precedence -- mirroring indexer/runtime.py. Hardcoding 6333 here made
+# this script permanently log "skipped" on any machine where setup had moved
+# Qdrant to another port: a silently dead sync.
+$QdrantPort = 6333; $OllamaPort = 11434
+$RuntimeFile = Join-Path $Root 'config\runtime.json'
+if (Test-Path $RuntimeFile) {
+    try {
+        $rt = Get-Content $RuntimeFile -Raw | ConvertFrom-Json
+        if ($rt.qdrant_port) { $QdrantPort = [int]$rt.qdrant_port }
+        if ($rt.ollama_port) { $OllamaPort = [int]$rt.ollama_port }
+    } catch {}
 }
-catch {
+if ($env:REMEMORY_QDRANT_PORT -match '^\d+$') { $QdrantPort = [int]$env:REMEMORY_QDRANT_PORT }
+if ($env:REMEMORY_OLLAMA_PORT -match '^\d+$') { $OllamaPort = [int]$env:REMEMORY_OLLAMA_PORT }
+
+function Test-Local([string]$url) {
+    # HttpWebRequest with Proxy = $null, not Invoke-RestMethod: the latter
+    # uses the system proxy, and a corporate proxy swallowing loopback made
+    # healthy services probe as offline (same fix as setup.ps1).
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($url)
+        $req.Timeout = 3000
+        $req.Proxy = $null
+        $req.GetResponse().Close()
+        return $true
+    } catch { return $false }
+}
+
+if (-not (Test-Local "http://127.0.0.1:$QdrantPort/readyz") -or
+    -not (Test-Local "http://127.0.0.1:$OllamaPort/api/tags")) {
     Write-Log "skipped: qdrant or ollama not reachable"
     exit 0
 }

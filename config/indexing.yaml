@@ -169,7 +169,10 @@ languages:
   .rb: { chunker: code, ts: ruby, language: ruby }
   .php: { chunker: code, ts: php, language: php }
   .c: { chunker: code, ts: c, language: c }
-  .h: { chunker: code, ts: c, language: c }
+  # .h uses the C++ grammar: it parses plain C fine, while the C grammar
+  # chokes on the classes/templates/namespaces that most real-world .h
+  # headers contain, dropping them into unstructured module-leftover chunks.
+  .h: { chunker: code, ts: cpp, language: c }
   .cpp: { chunker: code, ts: cpp, language: cpp }
   .hpp: { chunker: code, ts: cpp, language: cpp }
   .sql: { chunker: code, ts: sql, language: sql }
@@ -192,7 +195,11 @@ languages:
   .json: { chunker: text, language: json }
   .toml: { chunker: text, language: toml }
   .ini: { chunker: text, language: ini }
-  .env.example: { chunker: text, language: dotenv }
+  # NOTE: multi-dot names cannot be routed by extension -- pathlib's suffix
+  # for ".env.example" is ".example", so a key like ".env.example" here is
+  # never consulted. Files like .env.example/.env.sample are routed by NAME
+  # in discovery.py's by-name table instead.
+  .example: { chunker: text, language: dotenv }
   .tf: { chunker: text, language: terraform }
   .dockerfile: { chunker: text, language: dockerfile }
   .graphql: { chunker: text, language: graphql }

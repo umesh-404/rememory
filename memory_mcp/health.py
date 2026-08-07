@@ -96,7 +96,12 @@ def ensure_services() -> None:
     except (OSError, subprocess.SubprocessError):
         started = None
     if started is None or started.returncode != 0:
-        detail = (started.stderr.strip().splitlines() or ["unknown error"])[-1] if started else ""
+        # started is None = docker could not even be launched; a truthy
+        # CompletedProcess with empty stderr = ran but said nothing. The
+        # fallback text belongs to BOTH cases (it used to cover only the
+        # second, printing "(...)" with nothing inside for the first).
+        detail = (started.stderr.strip().splitlines()[-1]
+                  if started and started.stderr.strip() else "unknown error")
         print(
             f"rememory: could not start the database container ({detail}). "
             f"Run setup.ps1 / setup.sh once to recreate it.",

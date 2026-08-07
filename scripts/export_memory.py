@@ -9,7 +9,7 @@ content on import), or greppable by hand in twenty years with no software at
 all. The derived collections (code/docs) are deliberately not exported; they
 are rebuilt from files with one command.
 
-Run:    uv run --directory D:\\memory-system scripts/export_memory.py
+Run:    uv run scripts/export_memory.py
 Output: data/backups/memory-YYYYMMDD.json  (kept: most recent 30)
 """
 
@@ -45,6 +45,26 @@ def main() -> None:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%d")
     out = BACKUP_DIR / f"memory-{stamp}.json"
+
+    # Refuse to let an EMPTY export erode real backups: a freshly recreated
+    # (or damaged) memory collection exporting count=0 daily would, over 30
+    # days, rotate every good backup out of existence -- the exact scenario
+    # backups exist for. An empty export when no prior backup holds anything
+    # is fine (a brand-new install).
+    if not points:
+        for prior in sorted(BACKUP_DIR.glob("memory-*.json"), reverse=True):
+            if prior == out:
+                continue
+            try:
+                if json.loads(prior.read_text(encoding="utf-8")).get("count", 0) > 0:
+                    print("skipped: the memory collection is empty but "
+                          f"{prior.name} holds {json.loads(prior.read_text(encoding='utf-8'))['count']} "
+                          "memories -- keeping existing backups untouched. "
+                          "If the collection was emptied on purpose, delete old "
+                          "backups by hand; if not, restore with scripts/import_memory.py.")
+                    return
+            except (ValueError, OSError):
+                continue
     out.write_text(
         json.dumps(
             {

@@ -99,6 +99,32 @@ def _results(results) -> str:
     return _dump([r.to_dict() for r in results])
 
 
+def _is_connection_error(exc: BaseException) -> bool:
+    """Is this exception (or anything in its cause/context chain) a transport
+    failure, i.e. 'the database is unreachable' rather than a real bug?
+
+    Typed checks first -- qdrant-client wraps httpx, whose transport errors
+    (ConnectError, ConnectTimeout, ReadTimeout...) all derive from
+    httpx.TransportError, and OS-level failures are ConnectionError/TimeoutError.
+    The substring test survives only as a last resort for wrapper exceptions
+    whose chain was severed; it no longer fires on arbitrary messages that
+    merely contain the word 'connection'.
+    """
+    import httpx as _httpx
+
+    seen: set[int] = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        # Deliberately NOT bare OSError: a permission error on some file must
+        # not masquerade as "the database is down".
+        if isinstance(e, _httpx.TransportError | ConnectionError | TimeoutError):
+            return True
+        e = e.__cause__ or e.__context__
+    text = str(exc).lower()
+    return "connection refused" in text or "failed to connect" in text or "timed out" in text
+
+
 def _guard(fn):
     """Convert infrastructure failures into actionable guidance for Claude.
 
@@ -124,8 +150,7 @@ def _guard(fn):
                 f"Detail: {exc}"
             )
         except Exception as exc:
-            text = str(exc).lower()
-            if "connect" in text or "connection" in text or "refused" in text or "timed out" in text:  # noqa: E501
+            if _is_connection_error(exc):
                 return (
                     "SERVICE DOWN (Qdrant): cannot reach the vector database. "
                     "Docker Desktop is probably not running. "
@@ -377,17 +402,17 @@ def list_memories(
     """
     if err := _bad_project(project):
         return err
-    items = memory_store.list_memories(
+    items, page = memory_store.list_memories(
         project=project, memory_type=memory_type,
         include_superseded=include_superseded,
         # offset is bounded too: the pagination over-fetch reads offset+limit
         # rows, so an absurd offset would drag the whole collection through
         # one scroll.
         limit=_clamp(limit, 1, 100), offset=_clamp(offset, 0, 10_000),
+        with_page=True,
     )
     if not items and offset == 0:
         return "No memories stored yet."
-    page = memory_store.last_page
     return _dump({
         "total": page["total"],
         "count": len(items),
@@ -767,8 +792,11 @@ def memory_system_status() -> str:
 
 # Background sync bookkeeping. A sync that outlives the client's request
 # timeout must not be lost or duplicated: the thread keeps running and the
-# next sync_index call collects its result.
+# next sync_index call collects its result. The lock makes check-then-register
+# atomic -- FastMCP can serve tool calls concurrently, and without it two
+# near-simultaneous calls could both see "no job" and start two threads.
 _SYNC_JOBS: dict[str, dict] = {}
+_SYNC_LOCK = threading.Lock()
 # Comfortably under the MCP client request timeout, so a slow sync is reported
 # as "still running" by us rather than as a timeout error by the client.
 _SYNC_GRACE_SECONDS = 20.0
@@ -815,10 +843,11 @@ def sync_index(project: str) -> str:
     # lifetime. Creating a fresh client per sync_index call in a long-lived
     # process would accumulate unclosed connection pools -- a slow leak.
     global _SYNC_STORE, _SYNC_PIPELINE
-    if "_SYNC_STORE" not in globals():
-        _SYNC_STORE = Store(cfg)
-        _SYNC_STORE.verify()
-        _SYNC_PIPELINE = Pipeline(cfg)
+    with _SYNC_LOCK:
+        if "_SYNC_STORE" not in globals():
+            _SYNC_STORE = Store(cfg)
+            _SYNC_STORE.verify()
+            _SYNC_PIPELINE = Pipeline(cfg)
     store = _SYNC_STORE
 
     # Same single-writer lock as the CLI and the scheduled task: without it,
@@ -853,58 +882,47 @@ def sync_index(project: str) -> str:
             "errors": stats.errors[:5],
         }
 
-    job = _sync_job(project)
+    # Find-or-register atomically; the (potentially long) join happens outside
+    # the lock so one slow sync never blocks tool calls for other projects.
+    with _SYNC_LOCK:
+        job = _sync_job(project)
+        if job is None:
+            job = {"started": time.time(), "result": {}, "done": False}
 
-    # A sync started by an earlier call is still going: report progress rather
-    # than starting a second one or blocking again.
-    if job and job["thread"].is_alive():
-        job["thread"].join(timeout=_SYNC_GRACE_SECONDS)
-        if job["thread"].is_alive():
-            return _dump({
-                "project": project,
-                "status": "running",
-                "elapsed_seconds": round(time.time() - job["started"], 1),
-                "note": "Still indexing in the background. Call sync_index again "
-                        "for the final counts; searches already work against "
-                        "whatever has been written so far.",
-            })
-        return _dump(_sync_finish(project, job))
+            def _worker() -> None:
+                try:
+                    job["result"].update(_run_sync())
+                except Exception as exc:  # never let a thread die silently
+                    job["result"].update(
+                        {"project": project, "error": f"{type(exc).__name__}: {exc}"}
+                    )
+                finally:
+                    job["done"] = True
 
-    # A finished sync nobody has collected yet -- hand back its result once.
-    if job and job.get("done"):
-        return _dump(_sync_finish(project, job))
-
-    started = time.time()
-    result: dict = {}
-
-    def _worker() -> None:
-        try:
-            result.update(_run_sync())
-        except Exception as exc:  # never let a thread die silently
-            result.update({"project": project, "error": f"{type(exc).__name__}: {exc}"})
-        finally:
-            job_ref["done"] = True
-
-    job_ref = {"started": started, "result": result, "done": False}
-    thread = threading.Thread(target=_worker, name=f"sync-{project}", daemon=True)
-    job_ref["thread"] = thread
-    _SYNC_JOBS[project] = job_ref
-    thread.start()
+            thread = threading.Thread(target=_worker, name=f"sync-{project}", daemon=True)
+            job["thread"] = thread
+            _SYNC_JOBS[project] = job
+            thread.start()
 
     # Wait briefly: the common case (a warm project with few changes) finishes
     # in well under a second, and answering with the real counts is much more
     # useful than telling the caller to check back.
-    thread.join(timeout=_SYNC_GRACE_SECONDS)
+    thread = job["thread"]
+    if thread.is_alive():
+        thread.join(timeout=_SYNC_GRACE_SECONDS)
     if thread.is_alive():
         return _dump({
             "project": project,
             "status": "running",
-            "elapsed_seconds": round(time.time() - started, 1),
-            "note": "Indexing is taking a while, so it continues in the "
-                    "background rather than timing out this request. Call "
-                    "sync_index again for the final counts.",
+            "elapsed_seconds": round(time.time() - job["started"], 1),
+            "note": "Still indexing in the background rather than timing out "
+                    "this request. Call sync_index again for the final counts; "
+                    "searches already work against whatever has been written "
+                    "so far.",
         })
-    return _dump(_sync_finish(project, job_ref))
+    # Finished (just now, or earlier and uncollected) -- hand back the result.
+    with _SYNC_LOCK:
+        return _dump(_sync_finish(project, job))
 
 
 def main() -> None:

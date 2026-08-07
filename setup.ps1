@@ -459,8 +459,33 @@ Info "registering background tasks (sync every 30 min, backup daily 12:00)..."
 # pythonw.exe is a GUI-subsystem binary: Windows never gives it a console, so
 # there is nothing to flash. scripts/scheduled.py carries the same logging and
 # service-down guards the .ps1 files had.
-$TaskPythonw = Join-Path $Root ".venv\Scripts\pythonw.exe"
-if (Test-Path $TaskPythonw) {
+#
+# But it must be the BASE interpreter's pythonw.exe, not the venv's: the venv
+# pythonw.exe is a uv trampoline that re-launches the console-subsystem
+# interpreter, and that child allocates a visible console for the whole job --
+# a black python.exe window popping up every 30 minutes. The real GUI binary
+# lives in the directory named by `home =` in .venv\pyvenv.cfg (a path without
+# a patch version, so it stays valid across uv python point releases).
+# scheduled.py is stdlib-only precisely so it can run outside the venv; the
+# actual job is spawned with the venv interpreter and CREATE_NO_WINDOW.
+$TaskPythonw = $null
+$VenvCfg = Join-Path $Root ".venv\pyvenv.cfg"
+if (Test-Path $VenvCfg) {
+    foreach ($line in Get-Content $VenvCfg) {
+        if ($line -match '^\s*home\s*=\s*(.+)$') {
+            $candidate = Join-Path $Matches[1].Trim() "pythonw.exe"
+            if (Test-Path $candidate) { $TaskPythonw = $candidate }
+            break
+        }
+    }
+}
+if (-not $TaskPythonw) {
+    # Venv trampoline fallback: scheduled.py hides the trampoline's console
+    # itself, so the worst case is a brief flash, not a lingering window.
+    $VenvPythonw = Join-Path $Root ".venv\Scripts\pythonw.exe"
+    if (Test-Path $VenvPythonw) { $TaskPythonw = $VenvPythonw }
+}
+if ($TaskPythonw) {
     $syncCmd = "`"$TaskPythonw`" `"$Root\scripts\scheduled.py`" sync"
     $backupCmd = "`"$TaskPythonw`" `"$Root\scripts\scheduled.py`" backup"
 } else {
@@ -479,7 +504,6 @@ else {
     # Non-fatal: some locked-down machines block Task Scheduler. rememory
     # still works -- the assistant's sync_index tool and manual `uv run -m
     # indexer.cli sync` cover freshness; only the automation is missing.
-    Ok "memories seeded"
     Write-Host "      [!] could not register scheduled tasks (blocked on this machine?)." -ForegroundColor Yellow
     Write-Host "      rememory still works; run 'uv run -m indexer.cli sync' occasionally," -ForegroundColor Yellow
     Write-Host "      or let the assistant call sync_index after it writes files." -ForegroundColor Yellow

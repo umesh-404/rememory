@@ -89,9 +89,21 @@ function paintService(key, up, upText, downText) {
   card.querySelector(".svc-state").textContent = up ? upText : downText;
 }
 
+let statusInFlight = false;
+
 async function refreshStatus(showToast = false) {
   if (!api) return;
-  const st = await api.status();
+  // One poll at a time. When the stack is down, status() can take ~25s of
+  // probe timeouts; a 6s interval would stack half a dozen concurrent calls,
+  // each spawning its own `docker info` and racing the backend's blip logic.
+  if (statusInFlight) return;
+  statusInFlight = true;
+  let st;
+  try {
+    st = await api.status();
+  } finally {
+    statusInFlight = false;
+  }
   if (!st) return;
   lastStatus = st;
 
@@ -252,9 +264,13 @@ $("#btnDismissUpdate").addEventListener("click", () => {
 
 $("#btnApplyUpdate").addEventListener("click", async () => {
   busy(true, "Updating and restarting rememory…");
-  await act("apply_update", []);
-  // The process restarts itself; keep the overlay up so the window looks
-  // deliberately busy rather than frozen during the handover.
+  const res = await act("apply_update", []);
+  // On success the process restarts itself; keep the overlay up so the
+  // window looks deliberately busy rather than frozen during the handover.
+  // On FAILURE (diverged history, local changes, launch error) the process
+  // lives on -- drop the overlay or the dashboard is frozen behind a modal
+  // with only a toast to explain why.
+  if (!res || res.ok === false) busy(false);
 });
 
 /* ───────────────────────────── projects ───────────────────────────── */
@@ -351,11 +367,17 @@ $("#btnCreate").addEventListener("click", async () => {
 /* ───────────────────────────── memories ───────────────────────────── */
 
 let searchDebounce = null;
+let memoriesSeq = 0;
 
 async function loadMemories(query = "") {
   const box = $("#memoryList");
   box.innerHTML = `<div class="empty">Loading…</div>`;
+  // Each call owns a sequence number: a slow older request (searches embed
+  // the query, so latency varies a lot) must not overwrite the results of a
+  // newer one after the user kept typing.
+  const seq = ++memoriesSeq;
   const res = await api?.memories(query, 30);
+  if (seq !== memoriesSeq) return;
   if (!res || !res.ok) {
     box.innerHTML = `<div class="empty">${esc(res?.message || "Could not load memories.")}</div>`;
     return;
@@ -452,7 +474,8 @@ $("#btnRepo").addEventListener("click", () =>
   act("open_url", ["https://github.com/umesh-404/rememory"]));
 $("#btnRestart").addEventListener("click", async () => {
   busy(true, "Restarting rememory…");
-  await act("restart_app", []);
+  const res = await act("restart_app", []);
+  if (!res || res.ok === false) busy(false);  // failed = still alive; unfreeze
 });
 
 /* ───────────────────────────── boot ───────────────────────────── */

@@ -116,12 +116,50 @@ def test_sparse_determinism() -> None:
     check("identifier split present", len(a[0]) > 3, f"{len(a[0])} tokens")
 
 
+def test_nested_gitignore() -> None:
+    """Discovery honours nested .gitignore files with git's precedence:
+    patterns are relative to the file's directory, deeper files override
+    shallower ones, and ignored directories are pruned from the walk."""
+    import tempfile
+    from pathlib import Path
+
+    from indexer.config import Project, load_config
+    from indexer.discovery import Discovery
+
+    cfg = load_config()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / ".gitignore").write_text("noise_*.py\nbuild-out/\n", encoding="utf-8")
+        (root / "keep.py").write_text("x = 1  # top-level survives\n" * 4, encoding="utf-8")
+        (root / "noise_top.py").write_text("n = 0\n" * 20, encoding="utf-8")
+        (root / "build-out").mkdir()
+        (root / "build-out" / "artifact.py").write_text("y = 2\n" * 20, encoding="utf-8")
+        pkg = root / "pkg"
+        pkg.mkdir()
+        # Nested rules: ignore generated.py here; RE-INCLUDE noise_keep.py,
+        # which the ROOT .gitignore ignores -- the deeper file has the last word.
+        (pkg / ".gitignore").write_text("generated.py\n!noise_keep.py\n", encoding="utf-8")
+        (pkg / "generated.py").write_text("z = 3\n" * 20, encoding="utf-8")
+        (pkg / "real.py").write_text("w = 4\n" * 20, encoding="utf-8")
+        (pkg / "noise_keep.py").write_text("wanted = True\n" * 20, encoding="utf-8")
+
+        disc = Discovery(cfg, Project(name="t", root=root))
+        got = {f.rel_path for f in disc.walk()}
+
+    check("root .gitignore still applies", "noise_top.py" not in got, str(sorted(got)))
+    check("gitignored directory pruned", "build-out/artifact.py" not in got)
+    check("nested .gitignore applies in its directory", "pkg/generated.py" not in got)
+    check("nested negation overrides the root rule", "pkg/noise_keep.py" in got)
+    check("unignored files survive", {"keep.py", "pkg/real.py"} <= got)
+
+
 def main() -> int:
     print("unit tests (no services required)\n")
     test_redaction()
     test_code_chunker()
     test_docs_chunker()
     test_sparse_determinism()
+    test_nested_gitignore()
     print(f"\n{'FAILED: ' + ', '.join(failures) if failures else 'All checks passed.'}\n")
     return 1 if failures else 0
 

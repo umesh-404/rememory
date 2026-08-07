@@ -27,7 +27,12 @@ ROOT = Path(__file__).resolve().parent.parent
 # Binding a loopback port IS the lock (atomic, self-cleaning). A RANGE,
 # because on a machine where something else owns the first port we must
 # not mistake that for "rememory is already running" and refuse to start.
-LOCK_PORT_RANGE = range(49517, 49527)
+# The base port comes from runtime() (config/runtime.json / REMEMORY_APP_LOCK_PORT)
+# like every other port in the system -- nothing may hardcode one.
+from indexer.runtime import runtime as _runtime  # noqa: E402
+
+_LOCK_BASE = _runtime()["app_lock_port"]
+LOCK_PORT_RANGE = range(_LOCK_BASE, _LOCK_BASE + 10)
 POLL_SECONDS = 15
 UPDATE_CHECK_SECONDS = 6 * 60 * 60
 
@@ -103,25 +108,36 @@ class TrayApp:
             self._notify(f"Could not open the dashboard: {exc}")
 
     def serve_open_requests(self, lock: socket.socket) -> None:
-        """Accept 'open' pings from a second launch of the shortcut.
+        """Serve the lock socket: identity banner, then 'open' / 'quit' verbs.
 
         The single-instance lock is already a listening socket, so this costs
-        nothing extra: a later process connects, we open the dashboard. Errors
-        are swallowed deliberately -- an unrelated program probing the port
-        must never take down the tray.
+        nothing extra. The banner ("rememory") is what lets a later launch
+        tell OUR socket apart from an unrelated service squatting a port in
+        the range -- without it, detection had to assume first-free-port,
+        which meant a second launch simply bound the NEXT port and two tray
+        icons appeared. 'open' raises the dashboard; 'quit' shuts this
+        instance down (used by --replace during restarts). Errors are
+        swallowed deliberately -- an unrelated program probing the port must
+        never take down the tray.
         """
         while not self._stop.is_set():
             try:
                 conn, _ = lock.accept()
             except OSError:
                 return
+            data = b""
             with conn:
                 try:
-                    conn.settimeout(1)
-                    if b"open" in conn.recv(32):
-                        self.open_dashboard()
+                    conn.settimeout(2)
+                    conn.sendall(b"rememory\n")
+                    data = conn.recv(32)
                 except OSError:
                     continue
+            if b"quit" in data:
+                self.do_quit()
+                return
+            if b"open" in data:
+                self.open_dashboard()
 
     # -------------------------------------------------------- menu actions
     def _threaded(self, fn, *args) -> None:
@@ -265,53 +281,84 @@ class TrayApp:
 
 def _acquire_single_instance() -> socket.socket | None:
     """Bind a loopback port as a lock: it is atomic, needs no cleanup, and the
-    OS releases it even if the process is killed (a PID file would not)."""
-    ours = None
+    OS releases it even if the process is killed (a PID file would not). A
+    range, because a port squatted by an unrelated app must not read as
+    "rememory is already running" -- identity is checked separately, by the
+    banner handshake in _find_running_instance()."""
     for port in LOCK_PORT_RANGE:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.bind(("127.0.0.1", port))
             sock.listen(1)
-            ours = sock
-            break
+            return sock
         except OSError:
             sock.close()
             continue
-    if ours is not None:
-        return ours
-    # Every port in the range is taken. That almost certainly means another
-    # rememory tray is running -- but it could also be an unrelated app
-    # squatting the whole range, so say which we think it is and let the
-    # caller decide rather than silently doing nothing.
     return None
 
 
-def _signal_running_instance() -> bool:
-    """Ask an already-running tray to show its dashboard.
+def _find_running_instance() -> int | None:
+    """Port of an already-running rememory tray, or None.
 
-    Without this, clicking the Start-menu shortcut while rememory is already
-    in the tray does nothing visible at all: the second process finds the lock
-    held and exits. Under pythonw there is no console, so even the explanatory
-    message goes nowhere. Handing the request to the running instance is what
-    the user actually meant by clicking the icon.
+    Connecting is not enough -- any service could own a port in the range --
+    so a peer only counts as rememory if it presents the banner. (A tray from
+    a pre-banner version stays silent and is treated as foreign; the one
+    transitional restart across that upgrade can briefly show two icons.)
     """
     for port in LOCK_PORT_RANGE:
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1) as sock:
-                sock.sendall(b"open\n")
-            return True
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5) as sock:
+                sock.settimeout(1)
+                if sock.recv(16).startswith(b"rememory"):
+                    return port
         except OSError:
             continue
-    return False
+    return None
+
+
+def _send_verb(port: int, verb: bytes) -> bool:
+    """Deliver 'open' or 'quit' to the instance on `port` (banner checked)."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1) as sock:
+            sock.settimeout(1)
+            if not sock.recv(16).startswith(b"rememory"):
+                return False
+            sock.sendall(verb + b"\n")
+        return True
+    except OSError:
+        return False
 
 
 def main() -> int:
     hide_own_console()  # before anything slow, so no black window ever flashes
+
+    # Single-instance handling, by handshake rather than by bind-failure:
+    # binding "the first free port" can never DETECT a first instance (the
+    # second launch just binds the next port), which is exactly how every
+    # restart used to leave two tray icons -- the old one still running
+    # pre-update code. --replace (used by Api.restart_app) asks the running
+    # instance to quit and takes its place; a plain launch hands it an 'open'.
+    replace = "--replace" in sys.argv[1:]
+    running = _find_running_instance()
+    if running is not None:
+        if not replace:
+            _send_verb(running, b"open")
+            print("rememory is already running -- asked it to show the dashboard.",
+                  file=sys.stderr)
+            return 0
+        _send_verb(running, b"quit")
+        for _ in range(40):  # wait up to ~10s for the old instance to let go
+            if _find_running_instance() is None:
+                break
+            time.sleep(0.25)
+
     lock = _acquire_single_instance()
     if lock is None:
-        _signal_running_instance()
-        print("rememory is already running -- look for the tray icon.", file=sys.stderr)
-        return 0
+        print(f"rememory could not bind any lock port ({LOCK_PORT_RANGE.start}-"
+              f"{LOCK_PORT_RANGE.stop - 1} all taken by other programs) -- "
+              "running without a single-instance guard is not safe, so exiting.",
+              file=sys.stderr)
+        return 1
 
     app = TrayApp()
     # Serve the lock socket so a later launch can raise the dashboard.

@@ -22,6 +22,7 @@ import json
 import os
 import platform
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -132,6 +133,7 @@ class Api:
         self._version_cache: dict | None = None
         self._db_failures = 0
         self._db_was_up = False
+        self._collections_cache: dict[str, int] = {}
 
     def _scheduled_tasks(self, force: bool = False) -> dict:
         """Which background tasks are registered, cached for _TASKS_TTL_SECONDS.
@@ -201,16 +203,27 @@ class Api:
         models = []
         if ollama:
             models = [m.get("name", "") for m in ollama.get("models", [])]
-        needed = ["qwen3-embedding", "Qwen3-Reranker"]
+        # Derive the required names from config (like _our_models) so this
+        # check cannot drift from what the indexer and reranker actually use;
+        # the literals remain only as a fallback for an unreadable config.
+        needed = [n.split(":")[0] for n in self._our_models()] \
+            or ["qwen3-embedding", "Qwen3-Reranker"]
         models_ready = all(any(n.lower() in m.lower() for m in models) for n in needed)
 
         collections = {}
         if qdrant_up:
             for name in ("code", "docs", "memory"):
                 info = _get_json(f"{QDRANT}/collections/{name}")
-                collections[name] = (
-                    (info or {}).get("result", {}).get("points_count", 0) if info else 0
-                )
+                if info is None:
+                    # qdrant_up may be riding out a single blip (above); when
+                    # the count probe fails too, show the last-known number.
+                    # Writing 0 here painted "Database: Running · 0 / 0 / 0"
+                    # -- the exact flicker the blip logic exists to prevent,
+                    # moved from the status dot to the counters.
+                    collections[name] = self._collections_cache.get(name, 0)
+                else:
+                    collections[name] = info.get("result", {}).get("points_count", 0)
+            self._collections_cache = collections
 
         tasks = self._scheduled_tasks()
 
@@ -650,29 +663,17 @@ class Api:
     # ----------------------------------------------------------- memories
     def memories(self, query: str = "", limit: int = 25) -> dict:
         """Browse or search stored knowledge. Search goes through the real
-        retrieval pipeline, so the app sees exactly what the assistant sees."""
-        code = (
-            "import json,sys\n"
-            "from indexer.config import load_config\n"
-            "cfg=load_config()\n"
-            f"q={query!r}\n"
-            "if q.strip():\n"
-            "    from memory_mcp.search import Searcher\n"
-            "    hits=Searcher(cfg).search('memory', q, limit=%d, rerank=False)\n" % int(limit) +
-            "    out=[{'id':h.id,'title':h.extra.get('title'),'memory_type':h.extra.get('memory_type'),"  # noqa: E501
-            "'project':h.project,'tags':h.extra.get('tags',[]),'created_at':h.extra.get('created_at'),"  # noqa: E501
-            "'content':h.content,'score':round(h.score,3)} for h in hits]\n"
-            "else:\n"
-            "    from memory_mcp.memories import MemoryStore\n"
-            f"    ms=MemoryStore(cfg); items=ms.list_memories(limit={int(limit)})\n"
-            "    out=[]\n"
-            "    for m in items:\n"
-            "        full=ms._get(m['id']).payload or {}\n"
-            "        m['content']=full.get('content','')\n"
-            "        out.append(m)\n"
-            "sys.stdout.write('@@'+json.dumps(out))\n"
+        retrieval pipeline, so the app sees exactly what the assistant sees.
+
+        Runs scripts/app_memories.py in the project environment: the search
+        box's content travels as an argv value, never as generated source
+        code, and the app process keeps its no-heavy-imports rule."""
+        r = _run(
+            [_uv(), "run", "--directory", str(ROOT), "python",
+             str(ROOT / "scripts" / "app_memories.py"),
+             f"--query={query}", f"--limit={int(limit)}"],
+            timeout=120,
         )
-        r = _run([_uv(), "run", "--directory", str(ROOT), "python", "-c", code], timeout=120)
         if r is None or r.returncode != 0 or "@@" not in (r.stdout or ""):
             return {"ok": False, "message": "Could not read memories (is the database running?)",
                     "memories": []}
@@ -702,14 +703,20 @@ class Api:
         remotes = _run(["git", "remote"], timeout=10)
         if not remotes or "origin" not in (remotes.stdout or "").split():
             return {"ok": True, "available": False, "message": "No update remote configured."}
-        if not _run(["git", "fetch", "--quiet", "origin"], timeout=30):
+        fetched = _run(["git", "fetch", "--quiet", "origin"], timeout=30)
+        # A CompletedProcess is always truthy -- the failure signal is the
+        # return code, and without this check an offline fetch fell through
+        # and the update check silently compared against stale origin refs.
+        if fetched is None or fetched.returncode != 0:
             return {"ok": True, "available": False, "message": "Could not reach GitHub."}
         branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
         name = (branch.stdout.strip() if branch else "") or "main"
         behind = _run(["git", "rev-list", "--count", f"HEAD..origin/{name}"], timeout=10)
         count = int((behind.stdout or "0").strip() or 0) if behind else 0
         latest = _run(["git", "log", "-1", "--format=%h|%s", f"origin/{name}"], timeout=10)
-        commit, subject = ((latest.stdout.strip() if latest else "") + "|").split("|")[:2]
+        # maxsplit=1: a subject containing '|' must not be truncated at it
+        # (the sibling _version() already splits this way).
+        commit, subject = ((latest.stdout.strip() if latest else "") + "|").split("|", 1)[:2]
         dirty = _run(["git", "status", "--porcelain", "--untracked-files=no"], timeout=10)
         return {
             "ok": True,
@@ -752,7 +759,12 @@ class Api:
         script = ROOT / "scripts" / "diagnose.py"
         if not script.exists():
             return _err("diagnose.py is missing -- re-run setup to restore it.")
-        r = _run([_app_launcher()[0], str(script)], timeout=180)
+        # The script is stdlib-only, so the interpreter running this app can
+        # always execute it. (_app_launcher()[0] was wrong here: when the
+        # launcher falls back to `uv run ...`, its first element alone is just
+        # `uv`, and `uv diagnose.py` is not a valid invocation -- breaking the
+        # Diagnose button on exactly the broken-venv installs it exists for.)
+        r = _run([sys.executable, str(script)], timeout=180)
         if r is None:
             return _err("The diagnostic did not finish in time.")
         report = (r.stdout or "").strip() or (r.stderr or "").strip()
@@ -767,10 +779,16 @@ class Api:
         )
 
     def restart_app(self) -> dict:
-        """Relaunch the tray app detached, then exit this process tree."""
+        """Relaunch the tray app detached, then exit this process tree.
+
+        --replace makes the new instance ask any still-running tray to quit
+        and take its place. Without it, restarting from the DASHBOARD (a child
+        process) left the old tray alive on pre-update code, and the fresh
+        launch just added a second tray icon next to it.
+        """
         try:
             subprocess.Popen(
-                [*_app_launcher(), "-m", "app.main"],
+                [*_app_launcher(), "-m", "app.main", "--replace"],
                 cwd=str(ROOT), **_NO_WINDOW,
             )
         except OSError as exc:

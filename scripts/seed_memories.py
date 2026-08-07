@@ -2,8 +2,14 @@
 
 These are real memories about this system -- why the embedding model was
 chosen, why collections are partitioned by durability, what makes retrieval
-good -- so a fresh install starts with a worked example of what a good memory
-looks like, and so `search_memory` can answer questions about rememory itself.
+good -- so an install where the 'rememory' repo IS a registered project (a
+contributor's machine) starts with a worked example of what a good memory
+looks like, and `search_memory` can answer questions about rememory itself.
+
+On a normal install this is a NO-OP: rememory deliberately does not register
+itself (see config/projects.example.yaml), memories require a registered
+project, and seeding them into a user's own project would be pollution. The
+script says so and exits 0 rather than printing three confusing SKIPPED lines.
 
 Run from the repo root (uses the project environment):
 
@@ -82,6 +88,10 @@ SEEDS = [
 
 def main() -> None:
     cfg = load_config()
+    if "rememory" not in cfg.projects:
+        print("  seeds skipped: no 'rememory' project is registered (normal -- "
+              "rememory does not register itself; see the script docstring).")
+        return
     store = MemoryStore(cfg)
 
     existing_titles = {

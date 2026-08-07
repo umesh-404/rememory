@@ -7,8 +7,8 @@ re-embeds every memory with whatever model is currently configured -- exactly
 what you need after switching embedding models (when all stored vectors
 become invalid by definition).
 
-    uv run --directory D:\\memory-system scripts/import_memory.py                    # newest export
-    uv run --directory D:\\memory-system scripts/import_memory.py data\\backups\\memory-20260725.json
+    uv run scripts/import_memory.py                                # newest export
+    uv run scripts/import_memory.py data\\backups\\memory-20260725.json
 
 Semantics:
 * Upserts by original id -- restoring over a live collection is safe and
@@ -58,10 +58,37 @@ def main() -> int:
                   f"{pay.get('project', '?')}: {pay.get('title', '?')[:60]}")
         return 0
 
-    cfg = load_config()
-    from qdrant_client import QdrantClient
+    if data.get("collection") not in (None, "memory"):
+        raise SystemExit(f"REFUSED: {path.name} is an export of "
+                         f"'{data.get('collection')}', not of 'memory'.")
 
-    client = QdrantClient(url=cfg.qdrant_url, timeout=60)
+    cfg = load_config()
+    from indexer.store import Store
+
+    # Same invariant check the indexer runs: the collection must exist and its
+    # dense vector size must match the configured model. Without it, a restore
+    # after an embedding-model switch paid for a full re-embed and then died
+    # on the first upsert with a raw dimension-mismatch traceback -- the
+    # scenario this script is documented as THE migration path for. verify()
+    # points at create_collections.py, which rebuilds the collection at the
+    # new dimensions without touching other data.
+    store = Store(cfg)
+    store.verify()
+    client = store.client
+
+    # Memories from projects no longer in the registry restore fine but are
+    # half-usable: project-filtered search rejects the name and update_memory
+    # refuses it. Say so up front instead of leaving them silently crippled.
+    orphans = sorted({
+        p["payload"].get("project", "?") for p in points
+        if p["payload"].get("project") not in cfg.projects
+    })
+    if orphans:
+        print(f"  note: {len(orphans)} project(s) in this backup are not in "
+              f"config/projects.yaml: {', '.join(orphans)}. Their memories "
+              f"will restore and appear in unfiltered/cross-project search, "
+              f"but project-filtered tools reject them until you re-register "
+              f"the project(s).")
 
     restored = 0
     with Embedder(cfg.embedding) as embedder:

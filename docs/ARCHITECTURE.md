@@ -45,8 +45,10 @@ interrupted run is partially indexed but consistent.
 
 - **Discovery**: cheapest-first filters (dir prune → name → extension → size →
   content probe); binary detection by content (NUL byte / UTF-8 failure), not
-  extension; `.gitignore` respected; skips counted by reason and explorable
-  via `cli explain <path>`.
+  extension; `.gitignore` respected — including nested files, with git's own
+  precedence (patterns relative to their directory, deeper files override
+  shallower ones) and gitignored directories pruned from the walk; skips
+  counted by reason and explorable via `cli explain <path>`.
 - **Chunking = the quality lever.** One idea per vector: functions, methods
   (qualified `Class.method`), classes (header includes the docstring — it
   lives syntactically in the body), doc sections with full heading trails.

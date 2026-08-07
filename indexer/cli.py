@@ -163,7 +163,11 @@ def cmd_search(cfg: Config, args) -> int:
             if hit.start_line
             else hit.source_path
         )
-        console.print(f"\n[bold cyan]{hit.score:.3f}[/] [green]{location}[/] [dim]{hit.symbol or ''}[/]")  # noqa: E501
+        # Results are ORDERED by the cross-encoder when reranking ran, so show
+        # that score; hit.score is the raw RRF fusion value and printing it
+        # made the score column look unsorted.
+        shown = hit.extra.get("rerank", hit.score)
+        console.print(f"\n[bold cyan]{shown:.3f}[/] [green]{location}[/] [dim]{hit.symbol or ''}[/]")  # noqa: E501
         body = hit.content.strip().splitlines()
         for line in body[: args.context]:
             console.print(f"  [dim]|[/] {line[:140]}")

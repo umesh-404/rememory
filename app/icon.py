@@ -21,7 +21,11 @@ def make_icon(state: str = "unknown", size: int = 64):
     from PIL import Image, ImageDraw
 
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+    # "RGBA" mode makes semi-transparent draws BLEND with the tile. The
+    # default mode writes raw RGBA values instead, so the alpha-150 edge
+    # lines below punched see-through slots into the icon rather than
+    # drawing soft white lines over the indigo.
+    d = ImageDraw.Draw(img, "RGBA")
     s = size / 64.0  # everything below is authored at 64px and scaled
 
     # Tile with a simple vertical gradient (indigo -> violet).

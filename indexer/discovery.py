@@ -48,11 +48,18 @@ class Discovery:
         self.project = project
         self.skips: Counter[str] = Counter()
         self._ignore_dirs = set(config.discovery.ignore_dirs) | set(project.extra_ignore_dirs)
-        self._gitignore = self._load_gitignore() if config.discovery.respect_gitignore else None
+        self._respect_gitignore = config.discovery.respect_gitignore
+        # Lazily-loaded .gitignore specs, keyed by the POSIX directory path
+        # relative to the project root ("" = root). NESTED .gitignore files
+        # are honoured with git's own precedence: a deeper file's verdict
+        # overrides a shallower one's, and patterns are relative to the
+        # directory holding the file. Root-only support quietly over-indexed
+        # monorepos whose packages carry their own ignore rules.
+        self._gitignore_specs: dict[str, pathspec.PathSpec | None] = {}
 
     # ------------------------------------------------------------------ setup
-    def _load_gitignore(self) -> pathspec.PathSpec | None:
-        """Parse the project's .gitignore using git's own matching semantics.
+    def _spec_for_dir(self, rel_dir: str) -> pathspec.PathSpec | None:
+        """The parsed .gitignore living in `rel_dir` ("" = project root).
 
         We use `pathspec` rather than hand-rolling glob matching because
         .gitignore rules are deceptively subtle -- negation with `!`, anchoring
@@ -60,14 +67,37 @@ class Discovery:
         `**` spanning path separators. Reimplementing that is a well-known way
         to produce an index that is quietly missing files.
         """
-        gi = self.project.root / ".gitignore"
-        if not gi.exists():
-            return None
-        try:
-            lines = gi.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return None
-        return pathspec.PathSpec.from_lines("gitwildmatch", lines)
+        if rel_dir in self._gitignore_specs:
+            return self._gitignore_specs[rel_dir]
+        gi = self.project.root / rel_dir / ".gitignore" if rel_dir \
+            else self.project.root / ".gitignore"
+        spec: pathspec.PathSpec | None = None
+        if gi.is_file():
+            try:
+                lines = gi.read_text(encoding="utf-8", errors="replace").splitlines()
+                spec = pathspec.PathSpec.from_lines("gitwildmatch", lines)
+            except OSError:
+                spec = None
+        self._gitignore_specs[rel_dir] = spec
+        return spec
+
+    def _gitignored(self, rel_posix: str, *, is_dir: bool = False) -> bool:
+        """Is this path ignored, consulting every .gitignore on its ancestor
+        chain? Shallow files are checked first and deeper files override --
+        the same last-word-wins precedence git applies across files."""
+        if not self._respect_gitignore:
+            return False
+        parts = rel_posix.split("/")
+        ignored = False
+        for i in range(len(parts)):
+            spec = self._spec_for_dir("/".join(parts[:i]))
+            if spec is None:
+                continue
+            sub = "/".join(parts[i:]) + ("/" if is_dir else "")
+            verdict = spec.check_file(sub).include
+            if verdict is not None:
+                ignored = verdict
+        return ignored
 
     # ------------------------------------------------------------------- walk
     def walk(self) -> list[DiscoveredFile]:
@@ -85,6 +115,16 @@ class Discovery:
                 # Pruning in place stops os.walk from descending. This is the
                 # single most important performance decision in this module.
                 dirnames[:] = [d for d in dirnames if d not in self._ignore_dirs]
+                if self._respect_gitignore and dirnames:
+                    # Prune gitignored directories too: correctness aside, a
+                    # per-file check would still stat every file inside an
+                    # ignored data/ or .uv-cache/ tree.
+                    rel_dir = Path(os.path.relpath(dirpath, self.project.root)).as_posix()
+                    prefix = "" if rel_dir == "." else rel_dir + "/"
+                    dirnames[:] = [
+                        d for d in dirnames
+                        if not self._gitignored(prefix + d, is_dir=True)
+                    ]
 
                 for filename in filenames:
                     full = Path(dirpath) / filename
@@ -130,7 +170,7 @@ class Discovery:
             skip("binary/media extension")
             return None
 
-        if self._gitignore is not None and self._gitignore.match_file(rel_posix):
+        if self._gitignored(rel_posix):
             skip("matched .gitignore")
             return None
 

@@ -53,10 +53,16 @@ def index_lock():
                 age = STALE_SECONDS + 1
             if age >= STALE_SECONDS:
                 LOCK_PATH.unlink(missing_ok=True)
-                fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-                acquired = True
+                try:
+                    fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.write(fd, str(os.getpid()).encode())
+                    os.close(fd)
+                    acquired = True
+                except FileExistsError:
+                    # Two processes can both see the stale lock and both try
+                    # to steal it; the loser must report busy, not crash out
+                    # of the context manager with an uncaught exception.
+                    pass
         yield acquired
     finally:
         if acquired:

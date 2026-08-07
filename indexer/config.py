@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from .runtime import ollama_url as _ollama_url
 from .runtime import qdrant_url as _qdrant_url
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -141,7 +142,16 @@ def load_config() -> Config:
         # than relying on how an editor happened to save the file.
         query_prefix=m["query_prefix"] if m["query_prefix"].endswith(" ") else m["query_prefix"] + " ",  # noqa: E501
         document_prefix=m["document_prefix"],
-        base_url=p["base_url"].rstrip("/"),
+        # Ports live in runtime.py (config/runtime.json + REMEMORY_* env), so
+        # a stock base_url defers to ollama_url() -- otherwise changing
+        # ollama_port would fix the app but silently break the indexer and
+        # reranker, which read this field. An explicitly customised yaml value
+        # is still honoured.
+        base_url=(
+            _ollama_url()
+            if p.get("base_url", "").rstrip("/") in ("", "http://127.0.0.1:11434")
+            else p["base_url"].rstrip("/")
+        ),
         keep_alive=p["keep_alive"],
         timeout=p["request_timeout_seconds"],
         batch_size=emb["batching"]["size"],

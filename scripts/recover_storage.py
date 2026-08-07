@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -71,13 +72,20 @@ def docker(*args: str, timeout: int = 60):
 
 
 def qdrant_port() -> int:
+    # Same precedence as indexer/runtime.py: default <- runtime.json <- env.
+    # Ignoring REMEMORY_QDRANT_PORT made a SUCCESSFUL recovery poll the wrong
+    # port for 60s and then report failure on machines using the override.
+    import contextlib
+
+    port = 6333
     path = ROOT / "config" / "runtime.json"
     if path.exists():
-        try:
-            return int(json.loads(path.read_text(encoding="utf-8")).get("qdrant_port", 6333))
-        except (ValueError, OSError, TypeError):
-            pass
-    return 6333
+        with contextlib.suppress(ValueError, OSError, TypeError):
+            port = int(json.loads(path.read_text(encoding="utf-8")).get("qdrant_port", port))
+    env = os.environ.get("REMEMORY_QDRANT_PORT", "")
+    if env.isdigit():
+        port = int(env)
+    return port
 
 
 def wait_ready(port: int, seconds: int = 60) -> bool:

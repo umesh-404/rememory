@@ -18,8 +18,22 @@ Write-Host ""
 
 # Data safety first: if the memory collection is reachable, snapshot it
 # before doing anything else, so even a repair-gone-wrong loses nothing.
+# The port comes from config\runtime.json (setup may have moved Qdrant off
+# 6333), and the probe bypasses the system proxy like everything else does.
+$QdrantPort = 6333
+$RuntimeFile = Join-Path $Root 'config\runtime.json'
+if (Test-Path $RuntimeFile) {
+    try {
+        $rt = Get-Content $RuntimeFile -Raw | ConvertFrom-Json
+        if ($rt.qdrant_port) { $QdrantPort = [int]$rt.qdrant_port }
+    } catch {}
+}
+if ($env:REMEMORY_QDRANT_PORT -match '^\d+$') { $QdrantPort = [int]$env:REMEMORY_QDRANT_PORT }
 try {
-    Invoke-RestMethod http://127.0.0.1:6333/readyz -TimeoutSec 3 | Out-Null
+    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$QdrantPort/readyz")
+    $req.Timeout = 3000
+    $req.Proxy = $null
+    $req.GetResponse().Close()
     Write-Host "  Taking a safety backup of your memories first..." -ForegroundColor Cyan
     $Uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
     if (-not $Uv) { $Uv = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\uv.exe" }

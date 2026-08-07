@@ -186,6 +186,26 @@ def maybe_update() -> None:
     # update loop if anything goes sideways.
     os.environ[_REEXEC_FLAG] = "1"
     try:
+        if sys.platform == "win32":
+            # os.execv on Windows is emulated: it spawns a new process with
+            # default creation flags and exits. When the MCP host launched us
+            # without a console (Claude Desktop does), the replacement
+            # python.exe allocates a brand-new VISIBLE console window that
+            # sits on screen for the rest of the session. Spawn it ourselves
+            # with CREATE_NO_WINDOW instead, then exit and let it take over.
+            #
+            # The three std handles MUST be passed explicitly: on Windows,
+            # Popen without them calls CreateProcess with bInheritHandles=FALSE
+            # and no STARTF_USESTDHANDLES, so the child would get the invisible
+            # console's handles instead of our JSON-RPC pipes -- the client
+            # would see EOF, the session would die, and the replacement server
+            # would sit orphaned reading a console nobody can type into.
+            subprocess.Popen(
+                [sys.executable, "-m", "memory_mcp.server"],
+                stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+                **_NO_WINDOW,
+            )
+            sys.exit(0)
         os.execv(sys.executable, [sys.executable, "-m", "memory_mcp.server"])
     except OSError as exc:
         _log(f"restart failed ({exc}); the update takes effect on your next session.")

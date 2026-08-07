@@ -16,6 +16,10 @@ schema_version: 1
 
 provider:
   kind: ollama
+  # The stock value below is a documented default, not the source of truth:
+  # when it is unchanged, the port actually used comes from indexer/runtime.py
+  # (config/runtime.json, REMEMORY_OLLAMA_PORT env). Set a different URL here
+  # only to point at a non-standard Ollama, and it will be honoured as-is.
   base_url: http://127.0.0.1:11434
   # Ollama unloads an idle model after 5 minutes by default. That would make
   # the first Claude search after a pause pay a multi-second reload. We ask for
