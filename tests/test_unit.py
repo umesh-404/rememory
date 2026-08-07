@@ -123,10 +123,30 @@ def test_nested_gitignore() -> None:
     import tempfile
     from pathlib import Path
 
-    from indexer.config import Project, load_config
+    from indexer.config import DiscoveryConfig, Project
     from indexer.discovery import Discovery
 
-    cfg = load_config()
+    class _Cfg:
+        """Minimal stand-in for Config -- only the fields Discovery touches.
+
+        Deliberately NOT load_config(): that requires the user's gitignored
+        config/projects.yaml, which does not exist in CI, and this suite's
+        contract is 'needs nothing but the repo'.
+        """
+
+        discovery = DiscoveryConfig(
+            ignore_dirs=frozenset({".git"}),
+            ignore_files=frozenset(),
+            ignore_extensions=frozenset(),
+            ignore_suffixes=(),
+            max_file_bytes=2_000_000,
+            respect_gitignore=True,
+            binary_probe_bytes=8192,
+        )
+        languages = {".py": {"chunker": "code", "ts": "python", "language": "python"}}
+        doc_classification: list = []
+
+    cfg = _Cfg()
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / ".gitignore").write_text("noise_*.py\nbuild-out/\n", encoding="utf-8")
