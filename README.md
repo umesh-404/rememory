@@ -316,7 +316,13 @@ demand. Two layers cover the exceptions:
 - **Self-healing** — if the database container is stopped when a session
   begins (reboot, Docker restarted without it), the server quietly starts it
   itself: you just see `rememory: starting the local database... ready.` in
-  the log. Most "it isn't running" cases fix themselves this way.
+  the log. If the container is *gone entirely* — you ran `docker system
+  prune`, cleared Docker's volumes and images, reinstalled Docker Desktop —
+  it recreates it from `docker/compose.yml`, re-pulling the database image if
+  that was deleted too, and creates any missing collections. Your index and
+  memories survive all of this: they live in `data/` on your disk as a bind
+  mount, not inside a Docker volume, so Docker cleanup cannot reach them.
+  Most "it isn't running" cases fix themselves this way.
 - **The app** (Start menu -> **rememory**): Start and Stop live in the tray
   menu and the dashboard sidebar, and both are surgically scoped. **Stop**
   stops only the `rememory-qdrant` container and unloads only rememory's own
@@ -355,6 +361,7 @@ recognise what happened and know that re-running setup is usually the answer.
 | `SETUP FAILED … Ollama is installed but not responding` | Ollama isn't running — commonly right after a reboot | Setup now starts Ollama itself and waits. If it still fails, open the Ollama app once by hand |
 | Dashboard shows Database "Offline" / Docker flickering while everything looks fine in Docker Desktop | A proxy (corporate, VPN) was swallowing loopback requests, or a probe timed out on a cold WSL2 port-forward | Fixed in the app — it bypasses proxies for 127.0.0.1 and rides out single blips. If you still see it, run **Diagnose**: it names the exact cause, including proxy settings |
 | A dark window titled `rememory` or `Select rememory` with nothing in it | Not the dashboard — an old console window from a pre-`ee8eb25` shortcut. Clicking inside it froze the app (Windows QuickEdit) | `git pull`, then re-run setup once so the Start-menu shortcut is recreated to launch via `pythonw.exe` (pulling code alone does not update the shortcut) |
+| Nothing works after clearing Docker volumes/images (or `docker system prune`) | The container and image were deleted. Your data was not — it is a bind mount in `data/`, not a Docker volume | Just open the rememory app (or start any client session): it recreates the container, re-pulls the image and rebuilds missing collections by itself. If Qdrant then crash-loops with `Failed to load local shard`, the derived index was torn mid-write — run `uv run --no-project scripts/recover_storage.py --yes`, then `uv run -m indexer.cli sync`. Your `memory` collection is never touched |
 | Crash popups from `WavesSvc64.exe` or other `*.exe` you don't recognise | A third-party service on your machine (Waves MaxxAudio ships with Dell/HP audio drivers) — unrelated to rememory or Docker | Update the audio driver, or disable the Waves service in `services.msc`. Nothing in rememory needs changing |
 
 **If anything ever breaks** — weeks later, after an OS update, whatever —

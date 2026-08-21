@@ -290,7 +290,10 @@ class Api:
                     return _err("Docker Desktop is still starting. Give it a moment "
                                 "and press Start again.")
 
-            up = self._compose("up", "-d")
+            # up -d, not start: it recreates the container (and pulls the
+            # image) when Docker has been pruned or this is a fresh machine,
+            # reattaching the same bind-mounted data. 15 min covers a cold pull.
+            up = self._compose("up", "-d", timeout=900)
             if not up:
                 return _err("Could not start the database container. Try Repair.")
 
@@ -299,6 +302,16 @@ class Api:
                         _get_json(f"{QDRANT}/collections") is not None:
                     break
                 time.sleep(1)
+
+            # A healthy but EMPTY database (wiped Docker, fresh clone) would
+            # fail every search with "collection not found"; create them here
+            # so pressing Start is genuinely all it takes.
+            try:
+                from memory_mcp.health import _ensure_collections
+
+                _ensure_collections()
+            except Exception:
+                pass  # never let a repair step break the Start button
 
         if not _get_json(f"{OLLAMA}/api/tags"):
             self._launch_ollama()
@@ -416,13 +429,23 @@ class Api:
         return any(name == m or name.split(":")[0] == m.split(":")[0]
                    for m in self._loaded_models())
 
-    def _compose(self, *args: str) -> bool:
+    def _compose(self, *args: str, timeout: int = 180) -> bool:
+        """Run a compose subcommand, plugin form first then the legacy binary.
+
+        `up` needs a much longer timeout than `stop`: if Docker was pruned (or
+        this is a new machine) compose has to PULL the pinned image first, and
+        180s is not enough for ~100 MB on a slow link -- the pull would be
+        killed halfway and Start would report a failure that was really a
+        timeout.
+        """
         compose = ROOT / "docker" / "compose.yml"
         env = compose_env()
-        r = _run(["docker", "compose", "-f", str(compose), *args], timeout=180, env=env)
+        r = _run(["docker", "compose", "-f", str(compose), *args],
+                 timeout=timeout, env=env)
         if r and r.returncode == 0:
             return True
-        r = _run(["docker-compose", "-f", str(compose), *args], timeout=180, env=env)
+        r = _run(["docker-compose", "-f", str(compose), *args],
+                 timeout=timeout, env=env)
         return bool(r and r.returncode == 0)
 
     def _launch_docker_desktop(self) -> bool:
