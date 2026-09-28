@@ -167,11 +167,22 @@ def maybe_update() -> None:
         touched = (changed.stdout if changed and changed.returncode == 0 else "")
         if "uv.lock" in touched or "pyproject.toml" in touched:
             _log("dependencies changed -- installing")
+            # `--inexact`: a bare `uv sync` is EXACT and uninstalls everything
+            # outside the requested set -- including the desktop app's `app`
+            # extra, which silently broke the rememory icon after any update
+            # that touched dependencies. Keep the extra (and update it) when it
+            # is installed; never add it where it isn't (a server-only install
+            # would then have to build pywebview for nothing).
+            import importlib.util
+
+            cmd = [_uv(), "sync", "--inexact", "--directory", str(ROOT)]
+            if importlib.util.find_spec("pystray") is not None:
+                cmd[2:2] = ["--extra", "app"]
             try:
                 subprocess.run(
-                    [_uv(), "sync", "--directory", str(ROOT)],
-                    capture_output=True, text=True, timeout=600,
-                    check=False, **_NO_WINDOW,
+                    cmd, capture_output=True, text=True, timeout=600,
+                    # stdin too: it is the JSON-RPC input pipe in this process.
+                    stdin=subprocess.DEVNULL, check=False, **_NO_WINDOW,
                 )
             except (OSError, subprocess.SubprocessError):
                 # Non-fatal: the next `uv run` launch still fixes it, and

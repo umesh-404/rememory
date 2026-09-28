@@ -179,7 +179,9 @@ fi
 ok "qdrant ready on 127.0.0.1:$QPORT (loopback only -- unreachable from the network)"
 
 step "Building the Python environment (uv sync -- pinned Python 3.12, locked deps)"
-uv sync || fail "uv sync failed."
+# --inexact: a bare `uv sync` is exact and would uninstall a desktop-app extra
+# you added yourself (uv sync --extra app) every time setup is re-run.
+uv sync --inexact || fail "uv sync failed."
 ok "environment ready"
 
 step "Creating vector collections (code / docs / memory)"

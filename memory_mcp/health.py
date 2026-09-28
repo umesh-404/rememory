@@ -6,12 +6,17 @@ the Qdrant container is stopped (machine rebooted, Docker restarted without
 it, someone clicked Stop) while the Docker daemon itself is fine -- and that
 case is fixable in one `docker start`. So the server fixes it.
 
-What this deliberately does NOT do: launch Docker Desktop or Ollama
-themselves. Both are GUI applications the user chose to run (or not);
-force-starting them from a background process is surprising behaviour and
-slow (Docker Desktop takes ~30s+). For those cases the tool guard messages
-already tell the user exactly what to click, and the rememory app's Start
-button does it for them.
+What this deliberately does NOT do: launch Docker Desktop. It is a heavy GUI
+application (~30s+ to start) that the user chose to run or not; force-starting
+it from a background process is surprising. The tool guard messages tell the
+user what to click, and the rememory app's Start button does it for them.
+
+Ollama IS started, though -- a reversal of the original policy, which lumped
+it in with Docker Desktop. The two are not alike: Ollama comes up in ~2s, setup
+already starts it unasked, and rememory is completely inert without it (no
+embeddings means no search and no indexing). Leaving it down turned an
+ordinary reboot into "rememory isn't starting", with nothing in the log to say
+why.
 
 All output to stderr (stdout is JSON-RPC). Never raises: a failed heal just
 leaves things as they were, and the per-tool guards report actionable
@@ -26,12 +31,13 @@ import sys
 import time
 from pathlib import Path
 
-from indexer.runtime import compose_env, direct_urlopen, qdrant_url
+from indexer.runtime import compose_env, direct_urlopen, ollama_url, qdrant_url
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_FILE = ROOT / "docker" / "compose.yml"
 QDRANT_READY = f"{qdrant_url()}/readyz"
 QDRANT_COLLECTIONS = f"{qdrant_url()}/collections"
+OLLAMA_TAGS = f"{ollama_url()}/api/tags"
 CONTAINER = "rememory-qdrant"
 REQUIRED_COLLECTIONS = ("code", "docs", "memory")
 
@@ -149,8 +155,94 @@ def _ensure_collections() -> None:
               "run: uv run scripts/create_collections.py", file=sys.stderr)
 
 
+def _ollama_up(timeout: float = 3.0) -> bool:
+    """Is Ollama answering?"""
+    try:
+        with direct_urlopen(OLLAMA_TAGS, timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def launch_ollama() -> bool:
+    """Start Ollama without a console window. True if a launch was issued.
+
+    Shared by the self-heal below and the app's Start button, so the two can
+    never disagree about how Ollama is found. Prefers the desktop app (it
+    manages the server and keeps Ollama's own tray icon and auto-updates
+    working), then falls back to a bare `ollama serve`.
+
+    The child's std handles are ALWAYS pointed at DEVNULL. This runs inside
+    the MCP server, whose stdout is the JSON-RPC pipe: an `ollama serve` that
+    inherited it would write its log lines straight into the protocol stream
+    and kill the session. It also detaches the child from our session so the
+    server outlives this process.
+    """
+    quiet = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        import os
+
+        app = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama app.exe"
+        if app.exists():
+            try:
+                subprocess.Popen([str(app)], **quiet, **_NO_WINDOW)
+                return True
+            except OSError:
+                pass
+        detach = {"creationflags": 0x08000000 | 0x00000200}  # NO_WINDOW | NEW_PROCESS_GROUP
+    else:
+        if sys.platform == "darwin":
+            try:
+                if subprocess.run(["open", "-a", "Ollama"], **quiet,
+                                  timeout=15, check=False).returncode == 0:
+                    return True
+            except (OSError, subprocess.SubprocessError):
+                pass
+        detach = {"start_new_session": True}
+    try:
+        subprocess.Popen(["ollama", "serve"], **quiet, **detach)
+        return True
+    except OSError:
+        return False
+
+
+def _ensure_ollama() -> None:
+    """Start Ollama if it is installed but not running."""
+    if _ollama_up():
+        return
+    print("rememory: starting Ollama (the local AI model runtime)...", file=sys.stderr)
+    if not launch_ollama():
+        print("rememory: Ollama is not installed or could not be launched -- "
+              "install it from https://ollama.com/download, then reopen rememory.",
+              file=sys.stderr)
+        return
+    for _ in range(30):  # ~2s is typical; allow for a cold start
+        if _ollama_up():
+            print("rememory: Ollama ready.", file=sys.stderr)
+            return
+        time.sleep(1)
+    print("rememory: Ollama is starting slowly; searches will work once it is up.",
+          file=sys.stderr)
+
+
 def ensure_services() -> None:
-    """Heal what is cheaply healable; say one friendly line about the rest."""
+    """Heal what is cheaply healable; say one friendly line about the rest.
+
+    Ollama and Qdrant are checked INDEPENDENTLY. This used to open with
+    `if _qdrant_up(): return`, so on the common day where the database was
+    fine but Ollama was not (a reboot where Ollama did not auto-start), the
+    heal returned before Ollama was even looked at, and nothing was logged.
+    """
+    _ensure_ollama()
+    _ensure_qdrant()
+
+
+def _ensure_qdrant() -> None:
+    """Bring the vector database up: start, recreate, and fill collections."""
     if _qdrant_up():
         return
 

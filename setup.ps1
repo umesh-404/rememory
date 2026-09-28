@@ -405,7 +405,11 @@ Ok "qdrant ready on 127.0.0.1:$($ports.http) (loopback only -- unreachable from 
 
 # ---------------------------------------------------------------------------
 Step "Building the Python environment (uv sync -- pinned Python 3.12, locked deps)"
-& $Uv sync
+# --inexact on both syncs: a bare `uv sync` is EXACT and uninstalls anything
+# outside the requested set. Run first on a Repair, it stripped an already
+# working desktop app -- and if the re-add below then timed out, Repair left
+# the app broken where it had been fine. Additive syncs can only fix things.
+& $Uv sync --inexact
 if ($LASTEXITCODE -ne 0) { Fail "uv sync failed." }
 # The desktop app (tray + dashboard) is an optional extra: if its GUI
 # dependencies fail on this machine, the core system must still install.
@@ -413,7 +417,7 @@ if ($LASTEXITCODE -ne 0) { Fail "uv sync failed." }
 # is source-only and has to compile -- so it gets a hard time limit rather
 # than being allowed to stall the installer indefinitely.
 Info "adding the optional desktop app (compiles one small package; up to 10 min)..."
-$appCode = Invoke-WithTimeout $Uv @('sync', '--extra', 'app') 600
+$appCode = Invoke-WithTimeout $Uv @('sync', '--inexact', '--extra', 'app') 600
 if ($appCode -eq 0) {
     Ok "environment ready (including the desktop app)"
 } elseif ($appCode -eq -1) {

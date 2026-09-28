@@ -467,19 +467,12 @@ class Api:
         return False
 
     def _launch_ollama(self) -> bool:
-        if IS_WINDOWS:
-            exe = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Ollama/ollama app.exe"
-            if exe.exists():
-                try:
-                    subprocess.Popen([str(exe)], **_NO_WINDOW)
-                    return True
-                except OSError:
-                    return False
-        try:
-            subprocess.Popen(["ollama", "serve"], **_NO_WINDOW)
-            return True
-        except OSError:
-            return False
+        # One implementation, shared with the startup self-heal, so the Start
+        # button and the automatic path can never disagree about how Ollama
+        # is found (it also handles macOS and detaches the child properly).
+        from memory_mcp.health import launch_ollama
+
+        return launch_ollama()
 
     # ----------------------------------------------------------- projects
     def projects(self) -> dict:
@@ -766,7 +759,7 @@ class Api:
         if not merged or merged.returncode != 0:
             return _err("Could not fast-forward (histories diverged). "
                         "Run 'git pull --rebase' in the rememory folder.")
-        _run([_uv(), "sync", "--extra", "app"], timeout=600)
+        _run([_uv(), "sync", "--inexact", "--extra", "app"], timeout=600)
         self.restart_app()
         return _ok("Updated. Restarting the app...")
 

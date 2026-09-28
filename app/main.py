@@ -67,6 +67,92 @@ def hide_own_console() -> None:
         pass  # cosmetic only -- never prevent the app from starting
 
 
+# The desktop app's own packages -- the `app` extra in pyproject.toml.
+_APP_MODULES = ("pystray", "PIL", "webview")
+
+
+def _missing_app_modules() -> list[str]:
+    """Which of the app's packages are not importable (checked without importing)."""
+    import importlib.util
+
+    return [m for m in _APP_MODULES if importlib.util.find_spec(m) is None]
+
+
+def _error_box(title: str, text: str) -> None:
+    """Show an error the user can actually SEE.
+
+    The Start-menu shortcut runs this app under pythonw.exe, which has no
+    console: a print() goes nowhere, so a failed launch looked like clicking
+    the icon did nothing at all. A native message box needs no packages.
+    """
+    print(text, file=sys.stderr)
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST
+        ctypes.windll.user32.MessageBoxW(None, text, title, 0x10 | 0x10000 | 0x40000)
+    except Exception:
+        pass
+
+
+def ensure_app_dependencies() -> bool:
+    """Reinstall the app's packages if they have gone missing. True = ready.
+
+    They go missing more often than you would think, and silently: when uv
+    rebuilds the virtualenv (a uv upgrade that changes how it records its
+    Python, a replaced interpreter, a deleted .venv) it rebuilds it with only
+    the packages the TRIGGERING command asked for. That command is usually an
+    MCP client launching the server, which never asks for the `app` extra --
+    so the next click on the rememory icon found no pystray and exited without
+    a word. uv 0.11 -> 0.12 did exactly this.
+
+    `--inexact` makes the repair purely additive (it never removes anything),
+    and with uv's warm cache it takes well under a second. The output goes to
+    data/logs/app-repair.log so a failure can be diagnosed.
+    """
+    missing = _missing_app_modules()
+    if not missing:
+        return True
+
+    from .backend import _uv
+
+    log = ROOT / "data" / "logs" / "app-repair.log"
+    cmd = [_uv(), "sync", "--inexact", "--extra", "app", "--directory", str(ROOT)]
+    try:
+        done = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=900, cwd=str(ROOT),
+            stdin=subprocess.DEVNULL, check=False, **_NO_WINDOW,
+        )
+        ok, output = done.returncode == 0, (done.stdout or "") + (done.stderr or "")
+    except (OSError, subprocess.SubprocessError) as exc:
+        ok, output = False, f"{type(exc).__name__}: {exc}"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(f"{stamp}  missing={missing}  ok={ok}\n{output.strip()}\n\n")
+    except OSError:
+        pass
+
+    import importlib
+
+    importlib.invalidate_caches()  # let this process see the fresh install
+    if ok and not _missing_app_modules():
+        return True
+    _error_box(
+        "rememory could not start",
+        "Some of rememory's components are missing and could not be "
+        "reinstalled automatically.\n\n"
+        "Fix: open a terminal in the rememory folder and run\n"
+        "    uv sync --extra app\n"
+        "or re-run setup (it repairs everything and keeps your data).\n\n"
+        f"Details: {log}",
+    )
+    return False
+
+
 def _windowless_python() -> str:
     """Interpreter to spawn children with -- pythonw.exe where it exists.
 
@@ -331,6 +417,8 @@ def _send_verb(port: int, verb: bytes) -> bool:
 
 def main() -> int:
     hide_own_console()  # before anything slow, so no black window ever flashes
+    if not ensure_app_dependencies():
+        return 1
 
     # Single-instance handling, by handshake rather than by bind-failure:
     # binding "the first free port" can never DETECT a first instance (the

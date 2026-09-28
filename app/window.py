@@ -120,12 +120,14 @@ def main() -> int:
     if safe_mode:
         print("UI safe mode: GPU rendering disabled.", file=sys.stderr)
 
-    try:
-        import webview
-    except ImportError:
-        print("The desktop app needs pywebview. Install it with:\n"
-              "  uv sync --extra app", file=sys.stderr)
+    # Normally main.py has already repaired missing packages before spawning
+    # this window; this covers a direct launch, and turns a silent exit into
+    # a visible error.
+    from .main import ensure_app_dependencies
+
+    if not ensure_app_dependencies():
         return 1
+    import webview
 
     from .backend import Api
 
