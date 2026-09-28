@@ -153,6 +153,19 @@ def ensure_app_dependencies() -> bool:
     return False
 
 
+def _repair_tasks_quietly() -> None:
+    """Background wrapper: a scheduling hiccup must never affect the tray."""
+    try:
+        from .backend import repair_scheduled_tasks
+
+        fixed = repair_scheduled_tasks()
+        if fixed:
+            print(f"rememory: re-pointed scheduled tasks at the current Python: "
+                  f"{', '.join(fixed)}", file=sys.stderr)
+    except Exception:
+        pass
+
+
 def _windowless_python() -> str:
     """Interpreter to spawn children with -- pythonw.exe where it exists.
 
@@ -464,6 +477,9 @@ def main() -> int:
         .ensure_services(),
         daemon=True,
     ).start()
+    # Keep the background tasks pointed at the current interpreter: a uv
+    # upgrade can move it, and a stale path makes sync and backup stop silently.
+    threading.Thread(target=_repair_tasks_quietly, daemon=True).start()
     try:
         return app.run()
     finally:

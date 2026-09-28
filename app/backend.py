@@ -106,6 +106,68 @@ def _app_launcher() -> list[str]:
     return [_uv(), "run", "--extra", "app", "--directory", str(ROOT)]
 
 
+def _base_pythonw() -> Path | None:
+    """The base interpreter's pythonw.exe, read from .venv/pyvenv.cfg `home`.
+
+    Scheduled tasks must launch THIS one, not .venv/Scripts/pythonw.exe (a uv
+    trampoline whose console-subsystem child flashes a window every run).
+    """
+    try:
+        for line in (ROOT / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "home":
+                exe = Path(value.strip()) / "pythonw.exe"
+                return exe if exe.exists() else None
+    except OSError:
+        pass
+    return None
+
+
+# name -> (scheduled.py job, schtasks schedule) -- must match setup.ps1.
+_TASKS = {
+    "RememorySync": ("sync", ["/SC", "MINUTE", "/MO", "30"]),
+    "RememoryBackup": ("backup", ["/SC", "DAILY", "/ST", "12:00"]),
+}
+
+
+def repair_scheduled_tasks() -> list[str]:
+    """Re-point the background tasks at the current interpreter if stale.
+
+    setup.ps1 records the interpreter path when it registers the tasks, but
+    that path is not stable: uv 0.12 moved the venv from
+    .uv-python/cpython-3.12-... to .uv-python/cpython-3.12.13-..., and a later
+    uv cleanup of the old folder would make both tasks fail to launch --
+    silently, since Task Scheduler writes no rememory log. Checked on every
+    app launch; cheap (two schtasks queries) and a no-op when correct.
+
+    Only tasks that already exist are repaired -- if setup could not register
+    them (blocked machine) or the user removed them, that choice stands.
+    Returns the names re-registered.
+    """
+    if not IS_WINDOWS:
+        return []
+    exe = _base_pythonw()
+    if exe is None:
+        return []
+    import re
+
+    script = ROOT / "scripts" / "scheduled.py"
+    fixed = []
+    for name, (job, schedule) in _TASKS.items():
+        q = _run(["schtasks", "/Query", "/TN", name, "/XML"], timeout=10)
+        if q is None or q.returncode != 0:
+            continue
+        m = re.search(r"<Command>(.*?)</Command>", (q.stdout or "").replace("\x00", ""))
+        current = m.group(1).strip().strip('"') if m else ""
+        if current and Path(current) == exe:  # WindowsPath compares case-insensitively
+            continue
+        r = _run(["schtasks", "/Create", "/TN", name, "/TR", f'"{exe}" "{script}" {job}',
+                  *schedule, "/F"], timeout=20)
+        if r is not None and r.returncode == 0:
+            fixed.append(name)
+    return fixed
+
+
 def _ok(message: str, **extra) -> dict:
     return {"ok": True, "message": message, **extra}
 
