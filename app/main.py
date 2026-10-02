@@ -154,15 +154,29 @@ def ensure_app_dependencies() -> bool:
 
 
 def _repair_tasks_quietly() -> None:
-    """Background wrapper: a scheduling hiccup must never affect the tray."""
+    """Background wrapper: a scheduling hiccup must never affect the tray.
+
+    Outcomes go to data/logs/app-repair.log -- under pythonw there is no
+    console, and a swallowed exception here once hid exactly the failure this
+    repair exists to catch.
+    """
     try:
         from .backend import repair_scheduled_tasks
 
         fixed = repair_scheduled_tasks()
-        if fixed:
-            print(f"rememory: re-pointed scheduled tasks at the current Python: "
-                  f"{', '.join(fixed)}", file=sys.stderr)
-    except Exception:
+        message = (f"re-pointed scheduled tasks at the current Python: {', '.join(fixed)}"
+                   if fixed else "")
+    except Exception as exc:
+        message = f"scheduled-task repair failed: {type(exc).__name__}: {exc}"
+    if not message:
+        return
+    print(f"rememory: {message}", file=sys.stderr)
+    try:
+        log = ROOT / "data" / "logs" / "app-repair.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {message}\n")
+    except OSError:
         pass
 
 

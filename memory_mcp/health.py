@@ -229,6 +229,57 @@ def _ensure_ollama() -> None:
           file=sys.stderr)
 
 
+def pin_venv_to_minor_link() -> bool:
+    """Re-root .venv on uv's minor-version link (cpython-3.12-...) if it is
+    pinned to a patch folder (cpython-3.12.13-...). True if it changed it.
+
+    uv keeps `cpython-3.12-<platform>` as a link to the NEWEST 3.12 patch and
+    deletes old patch folders when it upgrades Python. A venv whose `home` is
+    the link follows upgrades transparently; one pinned to a patch folder dies
+    the moment that folder is removed -- every `uv run`, the dashboard's
+    Memories tab and the scheduled jobs then fail with "No Python at ...". On
+    Windows the removal is usually only PARTIAL (a running rememory holds
+    pythonw.exe open, so only python.exe is deleted), which made this look
+    like python.exe randomly vanishing. A plain `uv venv` records the link;
+    some recreation paths record the patch folder, so we normalise it here,
+    at startup, while the pinned interpreter still exists.
+
+    Only rewritten when the link exists and holds the same interpreter kind;
+    anything that is not a uv-managed CPython is left alone.
+    """
+    import re
+
+    cfg = ROOT / ".venv" / "pyvenv.cfg"
+    try:
+        # utf-8-sig: tolerate a byte-order mark (e.g. PowerShell 5.1's
+        # Set-Content -Encoding utf8 adds one), which would otherwise hide
+        # the first line -- `home` -- from the ^ anchor below.
+        text = cfg.read_text(encoding="utf-8-sig")
+    except OSError:
+        return False
+    m = re.search(r"^home\s*=\s*(.+?)\s*$", text, re.MULTILINE)
+    if not m:
+        return False
+    home = Path(m.group(1))
+    # Windows: home is the install folder. POSIX: home is its bin/ subfolder.
+    install, tail = (home.parent, home.name) if home.name == "bin" else (home, "")
+    mm = re.fullmatch(r"(cpython-\d+\.\d+)\.\d+(-.+)", install.name)
+    if not mm:
+        return False  # already the minor link, or not uv-managed
+    link = install.with_name(mm.group(1) + mm.group(2))
+    new_home = link / tail if tail else link
+    probe = new_home / ("python.exe" if sys.platform == "win32" else "python3")
+    if not probe.exists():
+        return False
+    try:
+        cfg.write_text(text[:m.start(1)] + str(new_home) + text[m.end(1):], encoding="utf-8")
+    except OSError:
+        return False
+    print(f"rememory: re-rooted the virtualenv on {link.name} so Python patch "
+          f"upgrades can no longer break it.", file=sys.stderr)
+    return True
+
+
 def ensure_services() -> None:
     """Heal what is cheaply healable; say one friendly line about the rest.
 
@@ -237,6 +288,7 @@ def ensure_services() -> None:
     fine but Ollama was not (a reboot where Ollama did not auto-start), the
     heal returned before Ollama was even looked at, and nothing was logged.
     """
+    pin_venv_to_minor_link()
     _ensure_ollama()
     _ensure_qdrant()
 
