@@ -83,6 +83,13 @@ if ! command -v uv >/dev/null; then
   command -v uv >/dev/null || fail "uv installed but not on PATH -- open a new shell and re-run."
 fi
 ok "uv at $(command -v uv)"
+# Keep rememory's Python and package cache inside the repo (this session only,
+# unless already set) so every launcher -- including MCP clients started with
+# a minimal environment -- builds on the same interpreter. scripts/connect.py
+# passes the same two paths to each client.
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$ROOT/.uv-python}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$ROOT/.uv-cache}"
+info "uv Python dir: $UV_PYTHON_INSTALL_DIR"
 
 step "Pulling local AI models into Ollama (first run downloads ~1.9 GB; shows its own progress)"
 ollama pull qwen3-embedding:0.6b || fail "Could not pull the embedding model."

@@ -55,6 +55,43 @@ def _never_proxy_loopback() -> None:
 _never_proxy_loopback()
 
 
+REPO_ROOT = CONFIG_DIR.parent
+UV_PYTHON_DIR = REPO_ROOT / ".uv-python"
+UV_CACHE = REPO_ROOT / ".uv-cache"
+
+
+def uv_location_env() -> dict[str, str]:
+    """The uv location variables rememory must always run with.
+
+    Pins uv's managed-Python and cache directories to folders inside the repo
+    whenever those folders exist and the variables are not already set.
+
+    Why this matters: uv picks the Python a venv is built on from its
+    managed-Python directory, which defaults to %APPDATA%\\uv\\python. Claude
+    Desktop is a packaged (MSIX) Windows app, and Windows silently redirects
+    its writes to %APPDATA% into the app's private store
+    (AppData\\Local\\Packages\\Claude_...\\LocalCache\\Roaming). Claude Desktop
+    launches the MCP server with `uv run` and a minimal environment, so uv
+    there saw a DIFFERENT, sandboxed Python directory, judged the venv
+    foreign, and rebuilt it on a Python that only exists inside Claude's
+    sandbox. Everything outside Claude -- the Start-menu app, the scheduled
+    sync and backup -- then died with "No Python at ...". Folders on the repo's
+    own drive are never virtualised, so every launcher agrees.
+    """
+    env = {}
+    if not os.environ.get("UV_PYTHON_INSTALL_DIR") and UV_PYTHON_DIR.is_dir():
+        env["UV_PYTHON_INSTALL_DIR"] = str(UV_PYTHON_DIR)
+    if not os.environ.get("UV_CACHE_DIR") and UV_CACHE.is_dir():
+        env["UV_CACHE_DIR"] = str(UV_CACHE)
+    return env
+
+
+# Applied at import, like the proxy fix above: every rememory process imports
+# this module early, and every uv command it spawns (dependency sync after an
+# update, the app's self-repair, the dashboard's Memories tab) inherits it.
+os.environ.update(uv_location_env())
+
+
 def direct_urlopen(url, timeout: float = 6.0):
     """urlopen that never consults a proxy.
 

@@ -934,11 +934,22 @@ class Api:
 
     def connection_config(self) -> dict:
         """The MCP snippet for this machine, ready to copy into any client."""
+        # Same env block as scripts/connect.py: without it, a client that
+        # launches uv with a minimal environment (Claude Desktop) uses a
+        # different -- and on Windows, sandboxed -- Python directory and
+        # rebuilds the venv on a Python nothing else can see.
+        env = {
+            "UV_PYTHON_INSTALL_DIR": os.environ.get("UV_PYTHON_INSTALL_DIR")
+            or str(ROOT / ".uv-python"),
+            "UV_CACHE_DIR": os.environ.get("UV_CACHE_DIR") or str(ROOT / ".uv-cache"),
+        }
         cfg = {"mcpServers": {"rememory": {
             "command": _uv(),
             "args": ["run", "--directory", str(ROOT), "-m", "memory_mcp.server"],
+            "env": env,
         }}}
-        cli = (f'claude mcp add --scope user rememory -- "{_uv()}" run '
+        flags = " ".join(f'-e "{k}={v}"' for k, v in env.items())
+        cli = (f'claude mcp add --scope user {flags} rememory -- "{_uv()}" run '
                f'--directory "{ROOT}" -m memory_mcp.server')
         return {"ok": True, "json": json.dumps(cfg, indent=2), "cli": cli}
 

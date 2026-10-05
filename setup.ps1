@@ -246,6 +246,16 @@ if (-not $Uv) {
     if (-not $Uv) { Fail "uv installed but not yet on PATH. Open a NEW terminal and re-run setup.ps1." }
 }
 Ok "uv at $Uv"
+# Keep rememory's Python and package cache inside the repo (for this setup
+# session, unless already set). uv's default lives under %APPDATA%, which
+# Claude Desktop -- a packaged Windows app -- silently redirects into its own
+# private sandbox; when it launched the server, uv rebuilt the venv on a
+# Python nothing outside Claude could see ("No Python at ..."). scripts/
+# connect.py hands the same two paths to every client. Machine-wide
+# variables are deliberately NOT set: other projects keep their own choice.
+if (-not $env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR = Join-Path $Root ".uv-python" }
+if (-not $env:UV_CACHE_DIR) { $env:UV_CACHE_DIR = Join-Path $Root ".uv-cache" }
+Info "uv Python dir: $env:UV_PYTHON_INSTALL_DIR"
 
 # ---------------------------------------------------------------------------
 Step "Pulling local AI models into Ollama (first run downloads ~1.9 GB; shows its own progress)"

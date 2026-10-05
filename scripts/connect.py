@@ -49,12 +49,35 @@ def find_uv() -> str:
     return "uv"  # last resort; the caller is told to fix PATH
 
 
+def uv_env() -> dict[str, str]:
+    """uv location variables every client must launch the server with.
+
+    MCP clients run `uv run` themselves, BEFORE any rememory code can pin
+    anything, and some (Claude Desktop) pass only a minimal environment. uv
+    then falls back to its default Python directory under %APPDATA% -- which
+    Claude Desktop, a packaged Windows app, silently redirects into its own
+    private sandbox. uv rebuilt the venv on a Python only Claude could see,
+    and the Start-menu app and scheduled jobs broke with "No Python at ...".
+    Passing the same, non-virtualised locations explicitly makes every
+    launcher agree. Values follow whatever this setup used (setup pins them
+    to folders inside the repo when they are not already set).
+    """
+    import os
+
+    return {
+        "UV_PYTHON_INSTALL_DIR": os.environ.get("UV_PYTHON_INSTALL_DIR")
+        or str(ROOT / ".uv-python"),
+        "UV_CACHE_DIR": os.environ.get("UV_CACHE_DIR") or str(ROOT / ".uv-cache"),
+    }
+
+
 def main() -> int:
     uv = find_uv()
     root = str(ROOT)
     args = ["run", "--directory", root, "-m", "memory_mcp.server"]
+    env = uv_env()
 
-    server_json = {"rememory": {"command": uv, "args": args}}
+    server_json = {"rememory": {"command": uv, "args": args, "env": env}}
     generic = json.dumps({"mcpServers": server_json}, indent=2)
 
     # Persist for later copy-paste (gitignored: machine-specific paths).
@@ -67,6 +90,7 @@ def main() -> int:
              " or ~/.config/Claude/claude_desktop_config.json (Linux)"
     )
     arg_str = " ".join(f'"{a}"' if " " in a else a for a in args)
+    env_flags = " ".join(f'-e "{k}={v}"' for k, v in env.items())
 
     print(f"""
 ================================================================
@@ -86,7 +110,7 @@ The generic config (also saved to mcp-config.json in this folder):
 CLAUDE CODE (CLI)
   Run this in your terminal (bash/cmd -- PowerShell 5.1 eats the `--`):
 
-    claude mcp add --scope user rememory -- "{uv}" run --directory "{root}" -m memory_mcp.server
+    claude mcp add --scope user {env_flags} rememory -- "{uv}" run --directory "{root}" -m memory_mcp.server
 
   Then restart your Claude Code sessions. Try: /mcp__rememory__kickoff <project>
 
@@ -108,11 +132,13 @@ WINDSURF
 
 VS CODE (GitHub Copilot agent mode)
   Add to "servers" in .vscode/mcp.json (or user mcp.json), shape:
-    {{ "rememory": {{ "type": "stdio", "command": "{uv}", "args": [...same args...] }} }}
+    {{ "rememory": {{ "type": "stdio", "command": "{uv}", "args": [...same args...],
+                    "env": {{ ...same env... }} }} }}
 
 ANY OTHER CLIENT
-  Point it at the command above -- stdio transport, no env vars,
-  no API keys.
+  Point it at the command above with the two UV_* variables from the
+  "env" block set -- stdio transport, no API keys. The variables keep uv
+  on the same Python as every other rememory launcher.
 ---------------------------------------------------------------
 
 After connecting, register your projects in config/projects.yaml and run:
