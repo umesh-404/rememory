@@ -26,6 +26,7 @@ messages when actually used.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -263,21 +264,75 @@ def pin_venv_to_minor_link() -> bool:
     home = Path(m.group(1))
     # Windows: home is the install folder. POSIX: home is its bin/ subfolder.
     install, tail = (home.parent, home.name) if home.name == "bin" else (home, "")
-    mm = re.fullmatch(r"(cpython-\d+\.\d+)\.\d+(-.+)", install.name)
+    mm = re.fullmatch(r"(cpython-\d+\.\d+)(?:\.\d+)?(-.+)", install.name)
     if not mm:
-        return False  # already the minor link, or not uv-managed
-    link = install.with_name(mm.group(1) + mm.group(2))
-    new_home = link / tail if tail else link
-    probe = new_home / ("python.exe" if sys.platform == "win32" else "python3")
-    if not probe.exists():
+        return False  # not a uv-managed CPython
+    minor_name = mm.group(1) + mm.group(2)
+    exe = "python.exe" if sys.platform == "win32" else "python3"
+
+    # Prefer the repo's own .uv-python minor link. A launcher that runs uv
+    # WITHOUT rememory's UV_* variables (Claude Desktop rewrote its config
+    # and dropped them) makes uv rebuild the venv on its default Python,
+    # which for a packaged app like Claude lives in a private sandbox no
+    # other program can see -- the Start-menu app and scheduled jobs then
+    # die with "No Python at ...". Pulling home back to the repo's folder
+    # undoes that within seconds of the server starting.
+    from indexer.runtime import UV_PYTHON_DIR
+
+    target = None
+    for link in (UV_PYTHON_DIR / minor_name, install.with_name(minor_name)):
+        candidate = link / tail if tail else link
+        if (candidate / exe).exists():
+            target = candidate
+            break
+    if target is None or Path(target) == home:
         return False
     try:
-        cfg.write_text(text[:m.start(1)] + str(new_home) + text[m.end(1):], encoding="utf-8")
+        version = subprocess.run(
+            [str(target / exe), "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+            check=False, **_NO_WINDOW,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        version = ""
+    new = text[:m.start(1)] + str(target) + text[m.end(1):]
+    if version:
+        new = re.sub(r"(?m)^version_info\s*=.*$", f"version_info = {version}", new)
+    try:
+        cfg.write_text(new, encoding="utf-8")
     except OSError:
         return False
-    print(f"rememory: re-rooted the virtualenv on {link.name} so Python patch "
-          f"upgrades can no longer break it.", file=sys.stderr)
+    print(f"rememory: re-rooted the virtualenv on {target} (was {home}).", file=sys.stderr)
+    _restore_app_extra()
     return True
+
+
+def _restore_app_extra() -> None:
+    """After a foreign rebuild the venv also lacks the desktop app's packages
+    (uv rebuilds with only what the launching command asked for). Put them
+    back additively so the Start-menu app works again. Uses the pinned UV_*
+    variables (set by indexer.runtime at import), so uv now accepts the venv."""
+    import importlib.util
+
+    if importlib.util.find_spec("pystray") is not None:
+        return
+    # MCP clients may launch us without the user's PATH.
+    uv = shutil.which("uv") or next((str(c) for c in (
+        Path.home() / "AppData/Local/Microsoft/WinGet/Links/uv.exe",
+        Path.home() / ".local/bin/uv.exe",
+        Path.home() / ".local/bin/uv",
+    ) if c.exists()), None)
+    if not uv:
+        return
+    try:
+        subprocess.run(
+            [uv, "sync", "--inexact", "--extra", "app", "--directory", str(ROOT)],
+            capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL,
+            check=False, **_NO_WINDOW,
+        )
+        print("rememory: restored the desktop app's packages.", file=sys.stderr)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def ensure_services() -> None:

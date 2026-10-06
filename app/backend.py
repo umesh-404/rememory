@@ -943,14 +943,17 @@ class Api:
             or str(ROOT / ".uv-python"),
             "UV_CACHE_DIR": os.environ.get("UV_CACHE_DIR") or str(ROOT / ".uv-cache"),
         }
-        cfg = {"mcpServers": {"rememory": {
-            "command": _uv(),
-            "args": ["run", "--directory", str(ROOT), "-m", "memory_mcp.server"],
-            "env": env,
-        }}}
+        # Prefer the venv's interpreter over `uv run` (see scripts/connect.py):
+        # no uv in the launch path means no client can rebuild the venv.
+        venv_py = ROOT / ".venv" / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
+        if venv_py.exists():
+            command, args = str(venv_py), ["-m", "memory_mcp.server"]
+        else:
+            command, args = _uv(), ["run", "--directory", str(ROOT), "-m", "memory_mcp.server"]
+        cfg = {"mcpServers": {"rememory": {"command": command, "args": args, "env": env}}}
         flags = " ".join(f'-e "{k}={v}"' for k, v in env.items())
-        cli = (f'claude mcp add --scope user {flags} rememory -- "{_uv()}" run '
-               f'--directory "{ROOT}" -m memory_mcp.server')
+        cli = (f'claude mcp add --scope user {flags} rememory -- "{command}" '
+               + " ".join(args))
         return {"ok": True, "json": json.dumps(cfg, indent=2), "cli": cli}
 
     # --------------------------------------------------------- settings

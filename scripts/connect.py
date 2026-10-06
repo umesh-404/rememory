@@ -74,8 +74,18 @@ def uv_env() -> dict[str, str]:
 def main() -> int:
     uv = find_uv()
     root = str(ROOT)
-    args = ["run", "--directory", root, "-m", "memory_mcp.server"]
     env = uv_env()
+    # Launch the venv's interpreter directly when it exists, NOT `uv run`:
+    # a client that starts uv without rememory's UV_* variables makes uv
+    # rebuild the venv on a different Python (Claude Desktop did, repeatedly,
+    # after rewriting its config without the env block). With no uv in the
+    # launch path, no client can trigger that rebuild.
+    venv_py = ROOT / ".venv" / ("Scripts/python.exe" if platform.system() == "Windows"
+                                else "bin/python")
+    if venv_py.exists():
+        uv, args = str(venv_py), ["-m", "memory_mcp.server"]
+    else:
+        args = ["run", "--directory", root, "-m", "memory_mcp.server"]
 
     server_json = {"rememory": {"command": uv, "args": args, "env": env}}
     generic = json.dumps({"mcpServers": server_json}, indent=2)
@@ -110,7 +120,7 @@ The generic config (also saved to mcp-config.json in this folder):
 CLAUDE CODE (CLI)
   Run this in your terminal (bash/cmd -- PowerShell 5.1 eats the `--`):
 
-    claude mcp add --scope user {env_flags} rememory -- "{uv}" run --directory "{root}" -m memory_mcp.server
+    claude mcp add --scope user {env_flags} rememory -- "{uv}" {arg_str}
 
   Then restart your Claude Code sessions. Try: /mcp__rememory__kickoff <project>
 
