@@ -188,9 +188,17 @@ none of which ever deletes anything:
 - **Related-on-write.** `store_memory` returns active memories in the
   0.62-0.85 similarity band -- the same subject but not a duplicate, exactly
   where a new fact silently contradicts an old one -- so the writer fixes them
-  in the same step. `review_memories` runs the same comparison across the
-  project (an older memory with a newer near-neighbour), plus missing files
-  named in the content and passed recheck dates.
+  in the same step. `review_memories` does NOT treat topic similarity as
+  staleness (parts of one series, or a feature and its follow-up, share a
+  topic without either being wrong). It flags only evidence: a newer memory
+  says it supersedes/replaces/reverses/overrides an id in this one's title,
+  this one's own title says SUPERSEDED/OBSOLETE while it is still active, a
+  newer memory restates it almost verbatim (similarity >= 0.92, numbered
+  series excepted), changed dependencies, passed recheck dates, and repo files
+  it names that are gone (checked against `git ls-files`, so paths relative to
+  a sub-app count, and text recording the deletion is not flagged).
+- **Short ids.** Every tool taking a memory id accepts the 8-character form
+  that briefings and reviews print (any unique prefix of 6+ characters).
 - **Evidence and expiry.** `evidence` (tested / read-at-source / reported /
   inferred) and `verified_at` travel with every result. `vendor` memories
   require a source URL and expire after 30 days (`recheck_after`); search

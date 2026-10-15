@@ -54,7 +54,7 @@ from indexer.config import CONFIG_DIR as ROOT_CONFIG  # noqa: E402
 from indexer.config import load_config  # noqa: E402
 
 from .memories import MemoryError, MemoryStore  # noqa: E402
-from .search import Searcher  # noqa: E402
+from .search import INTENT_POOL, Searcher, intent_types, prefer_types  # noqa: E402
 
 cfg = load_config()
 app = FastMCP(
@@ -341,8 +341,10 @@ def search_memory(
     anywhere before?").
 
     memory_type narrows to: decision, feature, api, bug, deployment,
-    implementation, design. Superseded versions are excluded unless
-    include_superseded=true.
+    implementation, design, fix, recipe, vendor. Superseded versions are
+    excluded unless include_superseded=true. Without a type, "how do I ..." /
+    "recipe" queries put matching recipes first and error queries put matching
+    fixes first.
 
     A memory is a claim from the past, not ground truth: each result carries
     age_days. If one disagrees with the code, CLAUDE.md or a newer memory,
@@ -353,8 +355,18 @@ def search_memory(
     filters: dict[str, Any] = {"memory_type": memory_type}
     if not include_superseded:
         filters["status"] = "active"
-    results = searcher.search("memory", query, project=project,
-                              limit=_clamp(limit, 1, 25), filters=filters)
+    limit = _clamp(limit, 1, 25)
+    wanted = None if memory_type else intent_types(query)
+    if wanted:
+        # Search a wider pool once and lift the wanted type to the front. A
+        # second type-filtered search would always return SOMETHING of that
+        # type, relevant or not; staying inside one pool keeps relevance.
+        pool = searcher.search("memory", query, project=project,
+                               limit=max(limit * 2, INTENT_POOL), filters=filters)
+        results = prefer_types(pool, wanted, limit)
+    else:
+        results = searcher.search("memory", query, project=project,
+                                  limit=limit, filters=filters)
     _label_memories(results)
     return _results(results)
 
@@ -455,6 +467,7 @@ def store_memory(
     """
     if supersedes:
         try:
+            supersedes = memory_store.resolve_id(supersedes)
             old = memory_store._get(supersedes)
         except MemoryError as exc:
             return f"REJECTED: {exc}"
@@ -529,7 +542,7 @@ def update_memory(
 @app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
 @_guard
 def get_memory(memory_id: str) -> str:
-    """Fetch ONE memory's FULL content and metadata by exact id.
+    """Fetch ONE memory's FULL content and metadata by id (full, or the 8-char short form).
 
     Use before update_memory when you need the complete existing text (search
     and list return previews/snippets; this returns everything), or to follow
@@ -571,6 +584,7 @@ def retire_memory(memory_id: str, reason: str, replaced_by: str | None = None) -
     Non-destructive: the content and your reason stay in history
     (include_superseded=true shows it); it just stops appearing as current
     knowledge in searches and briefings. Prefer this over delete_memory.
+    Ids may be the 8-character short form shown in briefings and reviews.
     """
     try:
         return _dump(memory_store.retire(memory_id, reason=reason, replaced_by=replaced_by))
@@ -595,9 +609,12 @@ def confirm_memory(memory_id: str) -> str:
 def review_memories(project: str, limit: int = 15) -> str:
     """List active memories that are PROBABLY STALE, with the reason for each.
 
-    Flags: a newer memory covers the same topic (likely changed the story),
-    the memory names repo files that no longer exist, or an operational note
-    is old and never re-confirmed. For each one, check it against the code /
+    Flags: a newer memory says it replaces this one's id (or restates it
+    almost word for word), its own title says SUPERSEDED while it is still
+    active, a file it depends on changed, its recheck date passed, it names
+    repo files that no longer exist, or an operational note is old and never
+    re-confirmed. Merely sharing a topic (e.g. parts of one series) is not a
+    flag. For each one, check it against the code /
     CLAUDE.md, then: update_memory (rewrite it), retire_memory (no longer
     true), or confirm_memory (still true). Run it when the briefing shows
     'Check before trusting', or after a big change lands.

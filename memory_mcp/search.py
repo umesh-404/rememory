@@ -21,6 +21,7 @@ same imported function, not a copy.
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -351,3 +352,33 @@ class Searcher:
             symbol=p.get("symbol_name") or p.get("heading_path"),
             extra=extra,
         )
+
+
+# Queries that ask HOW to do something want the verified command sequence
+# first; queries about an error want the recorded fix first.
+INTENT_POOL = 12
+INTENT_PROMOTE = 2
+_INTENTS = (
+    (re.compile(r"\b(?:recipes?|runbook|playbook|procedure|how\s+(?:do|can|should)\s+"
+                r"(?:i|we|you)|how\s+to|steps?\s+(?:to|for)|commands?\s+(?:to|for))\b", re.I),
+     ("recipe",)),
+    (re.compile(r"\b(?:error|exception|traceback|fail(?:s|ed|ing|ure)?|fix(?:es)?\s+for|"
+                r"broken|crash\w*|refused|denied)\b", re.I),
+     ("fix",)),
+)
+
+
+def intent_types(query: str) -> tuple[str, ...] | None:
+    for pattern, types in _INTENTS:
+        if pattern.search(query):
+            return types
+    return None
+
+
+def prefer_types(results: list, types: tuple[str, ...], limit: int) -> list:
+    """Move up to INTENT_PROMOTE results of `types` from the top of the pool
+    to the front, keeping every other result's order."""
+    window = results[:INTENT_POOL]
+    lifted = [r for r in window if r.extra.get("memory_type") in types][:INTENT_PROMOTE]
+    ids = {id(r) for r in lifted}
+    return (lifted + [r for r in results if id(r) not in ids])[:limit]

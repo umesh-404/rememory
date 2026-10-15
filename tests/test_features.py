@@ -411,11 +411,81 @@ def test_symbol_spans() -> None:
               symbols.locate(root, "../a.py", "f", None) is None)
 
 
+def test_memory_ids_and_review_rules() -> None:
+    from types import SimpleNamespace
+
+    from memory_mcp import memories
+    from memory_mcp.memories import MemoryError as MemErr
+
+    ids = ["2ef554fe-1111-4222-8333-444455556666", "2ef554aa-1111-4222-8333-444455556666",
+           "9b5af858-1111-4222-8333-444455556666"]
+
+    class FakeClient:
+        def scroll(self, **_kw):
+            return [SimpleNamespace(id=i) for i in ids], None
+
+    store = object.__new__(memories.MemoryStore)
+    store.client = FakeClient()
+    check("short id resolves", store.resolve_id("9b5af858") == ids[2])
+    check("full id passes through", store.resolve_id(ids[0].upper()) == ids[0])
+    for bad, why in (("2ef554", "ambiguous"), ("2ef5", "too short"), ("zz", "not an id"),
+                     ("deadbeef", "no match")):
+        try:
+            store.resolve_id(bad)
+            check(f"{why} id rejected", False)
+        except MemErr as exc:
+            check(f"{why} id rejected with a clear message", "point ID" not in str(exc),
+                  str(exc))
+
+    check("numbered parts are one series",
+          memories._same_series("Outpero teardown part 2 - config", "Outpero teardown part 8 - docs"))
+    check("(3/8) style series", memories._same_series("Audit (3/8): auth", "Audit (4/8): billing"))
+    check("different topics are not a series",
+          not memories._same_series("Auth part 1", "Billing part 2"))
+    check("plain titles are not a series",
+          not memories._same_series("Deploy notes", "Deploy notes v2"))
+    check("self-retired title detected",
+          bool(memories._SELF_RETIRED_RE.match("SUPERSEDED: D-36 stack on Bolna")))
+    check("ordinary title not self-retired",
+          not memories._SELF_RETIRED_RE.match("Superseding plan for workers"))
+    found = set()
+    for m in memories._REPLACES_RE.finditer("D-688 tiers (supersedes D-687 workspaces); "
+                                            "founder override of ADR-4, RFC-9"):
+        found |= set(memories._ID_RE.findall(m.group(1)))
+    check("replacement ids of any prefix", found == {"D-687", "ADR-4", "RFC-9"}, str(found))
+    check("deletion record is not 'missing file'",
+          memories._said_gone("We deleted apps/x/old.py and its tests.", "apps/x/old.py"))
+    check("a plain mention is", not memories._said_gone("See apps/x/old.py for the logic.",
+                                                        "apps/x/old.py"))
+    check("sub-app relative path found by suffix",
+          memories._tracked_suffix(frozenset({"apps/web/tests/setup.ts"}), "tests/setup.ts"))
+
+
+def test_search_intent() -> None:
+    from types import SimpleNamespace
+
+    from memory_mcp.search import intent_types, prefer_types
+
+    check("recipe intent", intent_types("how do I deploy to the VPS") == ("recipe",))
+    check("recipe keyword", intent_types("deploy to VPS recipe") == ("recipe",))
+    check("fix intent", intent_types("alembic upgrade failed with KeyError") == ("fix",))
+    check("no intent for topics", intent_types("Pipecat removal") is None)
+
+    def r(t, n):
+        return SimpleNamespace(extra={"memory_type": t}, n=n)
+    pool = [r("deployment", 1), r("deployment", 2), r("recipe", 3), r("bug", 4)]
+    out = prefer_types(pool, ("recipe",), 3)
+    check("recipe in the pool lifted to the top", [x.n for x in out] == [3, 1, 2])
+    check("nothing to lift keeps order",
+          [x.n for x in prefer_types(pool, ("fix",), 4)] == [1, 2, 3, 4])
+
+
 def main() -> int:
     print("feature tests (no services required)\n")
     for t in (test_briefing, test_localdb, test_facts, test_testmap, test_symbols,
               test_git_hooks, test_agent_hook_installers, test_agent_hook_output,
-              test_auto_supersede_is_narrow, test_symbol_spans):
+              test_auto_supersede_is_narrow, test_symbol_spans,
+              test_memory_ids_and_review_rules, test_search_intent):
         print(t.__name__)
         try:
             t()

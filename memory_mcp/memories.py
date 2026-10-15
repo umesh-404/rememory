@@ -16,6 +16,7 @@ Policy, enforced here rather than hoped for:
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -55,6 +56,73 @@ EVIDENCE = {
 }
 VENDOR_RECHECK_DAYS = 30
 _SUPERSEDE_RE = None  # compiled lazily
+
+_IDENT = r"[A-Z][A-Z0-9]{0,7}-\d+(?![\w-])"
+_ID_RE = re.compile(r"\b[A-Z][A-Z0-9]{0,7}-\d+(?![\w-])")
+# Review only (never retires anything): a wider verb list than auto-supersede.
+_REPLACES_RE = re.compile(
+    r"\b(?i:supersedes|superseded|superseding|replaces|replaced|replacing|reverses|"
+    r"reversed|reverting|overrides|overrode|override\s+of|overturns|overturned|"
+    r"retires|retired|obsoletes|undoes)"
+    rf"\s+((?:{_IDENT})(?:\s*(?:,|and|&|/)\s*{_IDENT})*)")
+_SELF_RETIRED_RE = re.compile(
+    r"^\W*(?:superseded|obsolete|retracted|deprecated|outdated|replaced|void)\b", re.I)
+_PART_RE = re.compile(
+    r"\b(?:part|pt\.?|section|chapter|episode|step)\s*(?:\d+|[ivx]+)\b"
+    r"|\(\s*\d+\s*/\s*\d+\s*\)|\b\d+\s+of\s+\d+\b", re.I)
+
+
+_GONE_RE = re.compile(r"\b(?:delet\w*|remov\w*|retir\w*|dropp\w*|prun\w*|gone|"
+                      r"no longer exists?|renamed|moved)\b", re.I)
+
+
+def _said_gone(text: str, ref: str) -> bool:
+    """True if the text near a mention of `ref` says it was deleted/moved."""
+    start = 0
+    while (k := text.find(ref, start)) != -1:
+        if _GONE_RE.search(text[max(0, k - 90):k + len(ref) + 90]):
+            return True
+        start = k + len(ref)
+    return False
+
+
+def _tracked_files(root) -> frozenset[str] | None:
+    """Every git-tracked path, so a path written relative to a sub-app
+    (tests/setup.ts for apps/web/tests/setup.ts) is not reported missing."""
+    import subprocess
+    import sys
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z"], capture_output=True, timeout=15,
+            check=False, stdin=subprocess.DEVNULL,
+            **({"creationflags": 0x08000000} if sys.platform == "win32" else {}))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return frozenset(out.stdout.decode("utf-8", "replace").split("\0")) - {""}
+
+
+def _tracked_suffix(tracked: frozenset[str] | None, ref: str) -> bool:
+    if not tracked:
+        return False
+    tail = "/" + ref
+    return any(t.endswith(tail) for t in tracked)
+
+
+def _same_series(a: str, b: str) -> bool:
+    """Numbered parts of one write-up ("X part 3", "X (4/8)") complement each
+    other; a later part never makes an earlier one stale."""
+    if not (_PART_RE.search(a) and _PART_RE.search(b)):
+        return False
+
+    def stem(t: str) -> str:
+        # The series name is what comes before the part marker.
+        m = _PART_RE.search(t)
+        return " ".join(re.sub(r"\W+", " ", t[:m.start()] if m else t).lower().split())
+    sa, sb = stem(a), stem(b)
+    return bool(sa) and sa == sb
 
 MIN_CONTENT_CHARS = 40      # below this it is a note-to-self, not knowledge
 MAX_CONTENT_CHARS = 8000    # above this it is a transcript dump; distill it
@@ -101,7 +169,9 @@ class MemoryStore:
     # own Pipecat loop" vs a later "Pipecat removed"). Surfaced on store and
     # flagged by review(), never acted on automatically.
     RELATED_FLOOR = 0.62
-    REVIEW_THRESHOLD = 0.70
+    # A newer memory this close restates the same facts (paraphrases of one
+    # fact score ~0.91; distinct same-topic notes 0.70-0.88 on this corpus).
+    RESTATED_THRESHOLD = 0.92
     # Operational notes rot faster than decisions.
     PERISHABLE_TYPES = ("deployment", "bug", "api", "implementation")
     PERISHABLE_DAYS = 90
@@ -178,6 +248,7 @@ class MemoryStore:
         payload.update(extra)
 
         if supersedes:
+            supersedes = self.resolve_id(supersedes)
             old = self._get(supersedes)
             payload["supersedes"] = supersedes
             # Mark the old one superseded, but never touch its content.
@@ -210,6 +281,7 @@ class MemoryStore:
         Implemented as store(supersedes=old) so history is preserved. Fields
         not provided are carried over from the original.
         """
+        memory_id = self.resolve_id(memory_id)
         old = self._get(memory_id)
         p = old.payload
         if p.get("status") == "superseded":
@@ -262,6 +334,7 @@ class MemoryStore:
     def delete(self, memory_id: str) -> dict[str, str]:
         """Hard-delete ONE memory by exact id. The only destructive operation,
         and deliberately the narrowest: no filters, no lists, no wildcards."""
+        memory_id = self.resolve_id(memory_id)
         old = self._get(memory_id)  # raises if it does not exist
         title = old.payload.get("title", "?")
         self.client.delete(
@@ -280,6 +353,7 @@ class MemoryStore:
         different memory). Non-destructive: content stays, status flips, the
         reason is recorded, so the history still explains what changed.
         """
+        memory_id = self.resolve_id(memory_id)
         old = self._get(memory_id)
         if (old.payload or {}).get("status") != "active":
             raise MemoryError(f"Memory {memory_id} is not active; nothing to retire.")
@@ -291,7 +365,9 @@ class MemoryStore:
             "updated_at": datetime.now(UTC).isoformat(),
         }
         if replaced_by:
-            self._get(replaced_by)  # must exist
+            replaced_by = self.resolve_id(replaced_by)  # must exist; short ids ok
+            if replaced_by == memory_id:
+                raise MemoryError("A memory cannot be replaced by itself.")
             payload["superseded_by"] = replaced_by
         self.client.set_payload(collection_name=COLLECTION, payload=payload,
                                 points=[memory_id], wait=True)
@@ -302,6 +378,7 @@ class MemoryStore:
     def confirm(self, memory_id: str) -> dict:
         """Record that a memory was checked and still holds; review() stops
         flagging it against memories written before this confirmation."""
+        memory_id = self.resolve_id(memory_id)
         old = self._get(memory_id)
         if (old.payload or {}).get("status") != "active":
             raise MemoryError(f"Memory {memory_id} is not active.")
@@ -382,9 +459,10 @@ class MemoryStore:
     def _review(self, project: str, root=None, limit: int = 20) -> list[dict[str, Any]]:
         """Active memories that are probably stale, with the reason.
 
-        Three signals, none of them acted on automatically:
-        * a NEWER active memory covers the same topic (dense similarity >=
-          REVIEW_THRESHOLD) -- the later one likely changed the story;
+        Signals, none of them acted on automatically:
+        * evidence a NEWER memory replaces it (see the comment below -- topic
+          similarity alone is deliberately not enough);
+        * suspect dependencies or a passed recheck date;
         * the content names repo files that no longer exist;
         * an operational note older than PERISHABLE_DAYS, never re-confirmed.
         A memory confirmed (confirm_memory) after the newer one was written is
@@ -425,38 +503,70 @@ class MemoryStore:
             return list(v or [])
 
         flags: dict[int, list[str]] = {}
-        newer_of: dict[int, tuple[int, float]] = {}
+        newer_of: dict[int, tuple[int, str]] = {}  # i -> (j, why): likely replaced
+        n = len(rows)
+        titles = [(p.payload or {}).get("title") or "" for p in rows]
+
+        # Topical similarity alone is NOT staleness: parts 1-8 of one teardown,
+        # or a feature and its follow-up, are all "about the same thing" without
+        # either being out of date. Only evidence that the newer memory REPLACES
+        # the older one counts:
+        #   * the older one's own title says SUPERSEDED/OBSOLETE/... (still active);
+        #   * a newer memory says it supersedes/replaces/reverses/overrides an id
+        #     (D-36, ADR-4) that the older one's title carries;
+        #   * a newer memory is a near-copy (similarity >= RESTATED) and the two
+        #     are not numbered parts of one series.
+        for i, t in enumerate(titles):
+            if _SELF_RETIRED_RE.match(t):
+                flags.setdefault(i, []).append(
+                    "its title says it is superseded/obsolete, but it is still active "
+                    "-- retire_memory it (or remove the marker if it is current)")
+        title_ids = [set(_ID_RE.findall(t)) for t in titles]
+        replaced_ids: list[set[str]] = []
+        for j, p in enumerate(rows):
+            pj = p.payload or {}
+            named: set[str] = set()
+            for m in _REPLACES_RE.finditer(f"{titles[j]}\n{pj.get('content') or ''}"):
+                named |= set(_ID_RE.findall(m.group(1)))
+            replaced_ids.append(named - title_ids[j])
+        sims = None
         vectors = [vec(p) for p in rows]
         dim = max((len(v) for v in vectors), default=0)
-        if len(rows) > 1 and dim and all(len(v) == dim for v in vectors):
+        if n > 1 and dim and all(len(v) == dim for v in vectors):
             mat = np.asarray(vectors, dtype=np.float32)
             norms = np.linalg.norm(mat, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
             unit = mat / norms
             sims = unit @ unit.T
-            n = len(rows)
-            for i in range(n):
-                for j in range(n):
-                    if i == j or sims[i, j] < self.REVIEW_THRESHOLD:
-                        continue
-                    if created[j] <= created[i]:
-                        continue  # only a NEWER memory can make i stale
-                    if verified[i] and verified[i] >= created[j]:
-                        continue
-                    best = newer_of.get(i)
-                    if best is None or sims[i, j] > best[1]:
-                        newer_of[i] = (j, float(sims[i, j]))
-        for i, (j, sim) in newer_of.items():
+        for i in range(n):
+            for j in range(n):
+                if i == j or created[j] <= created[i]:
+                    continue  # only a NEWER memory can replace i
+                if verified[i] and verified[i] >= created[j]:
+                    continue  # confirmed still true after j was written
+                hit = title_ids[i] & replaced_ids[j]
+                if hit:
+                    why = f"says it replaces {', '.join(sorted(hit))}"
+                elif (sims is not None and sims[i, j] >= self.RESTATED_THRESHOLD
+                      and not _same_series(titles[i], titles[j])):
+                    why = f"restates the same facts (similarity {sims[i, j]:.2f})"
+                else:
+                    continue
+                if i not in newer_of or hit:
+                    newer_of[i] = (j, why)
+        for i, (j, why) in newer_of.items():
             pj = rows[j].payload or {}
             flags.setdefault(i, []).append(
                 f"newer memory {str(rows[j].id)[:8]} '{pj.get('title')}' "
-                f"({(pj.get('created_at') or '')[:10]}) covers the same topic "
-                f"(similarity {sim:.2f}) -- check whether it changed this"
-            )
+                f"({(pj.get('created_at') or '')[:10]}) {why} -- check whether this is "
+                f"still true")
 
         # Repo-relative paths with an extension, e.g. apps/api/src/main.py.
-        path_re = re.compile(r"(?<![\w/.:-])((?:[\w.-]+/)+[\w-]+\.[A-Za-z]{1,5})(?![\w/])")
+        # Multi-dot names (dashboard.test.tsx) are captured whole.
+        path_re = re.compile(
+            r"(?<![\w/.:-])((?:[\w.-]+/)+[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{1,5})(?![\w/.])")
         root_path = Path(root) if root else None
+        tracked = _tracked_files(root_path) if root_path is not None else None
         today = now.date().isoformat()
         for i, p in enumerate(rows):
             pl = p.payload or {}
@@ -471,9 +581,14 @@ class MemoryStore:
                     f"recheck date {str(pl['recheck_after'])[:10]} has passed -- re-read "
                     f"{pl.get('source_url') or 'the source'} and confirm_memory or update it")
             if root_path is not None and root_path.exists():
+                text = pl.get("content") or ""
+                gone_record = _GONE_RE.search(pl.get("title") or "")
                 missing = [
-                    ref for ref in dict.fromkeys(path_re.findall(pl.get("content") or ""))
-                    if _inside(root_path, ref) and not (root_path / ref).exists()
+                    ref for ref in dict.fromkeys(path_re.findall(text))
+                    if _inside(root_path, ref) and (root_path / ref.split("/")[0]).is_dir()
+                    and not (root_path / ref).exists() and not _tracked_suffix(tracked, ref)
+                    # A memory RECORDING the deletion is accurate, not stale.
+                    and not gone_record and not _said_gone(text, ref)
                 ]
                 if missing:
                     flags.setdefault(i, []).append(
@@ -493,7 +608,8 @@ class MemoryStore:
                 "created_at": pl.get("created_at"),
                 "reason": "; ".join(reasons),
                 "preview": (pl.get("content") or "")[:200],
-                "_contradiction": i in newer_of,
+                "_contradiction": i in newer_of or bool(_SELF_RETIRED_RE.match(
+                    pl.get("title") or "")),
             })
         # Contradiction candidates first (most dangerous), then oldest first.
         out.sort(key=lambda r: (not r["_contradiction"], r["created_at"] or ""))
@@ -760,10 +876,49 @@ class MemoryStore:
             for h in hits if h.score < self.DUPLICATE_THRESHOLD
         ]
 
+    def resolve_id(self, memory_id: str) -> str:
+        """The full id for a full id OR a unique prefix of one (briefings and
+        review lists show 8 characters). Never passes a raw Qdrant
+        "not a valid point ID" error through to the agent."""
+        raw = (memory_id or "").strip().lower()
+        compact = raw.replace("-", "")
+        if not compact or any(c not in "0123456789abcdef" for c in compact):
+            raise MemoryError(
+                f"{memory_id!r} is not a memory id. Ids look like '2ef554fe' (short) or "
+                f"'2ef554fe-....' (full); get them from search/list/briefing results.")
+        if len(compact) == 32:
+            return f"{compact[:8]}-{compact[8:12]}-{compact[12:16]}-{compact[16:20]}-{compact[20:]}"
+        if len(compact) < 6:
+            raise MemoryError(f"Id prefix {memory_id!r} is too short; give at least 6 "
+                              f"characters (briefings show 8).")
+        matches: list[str] = []
+        offset = None
+        while True:
+            page, offset = self.client.scroll(collection_name=COLLECTION, limit=1000,
+                                              offset=offset, with_payload=False,
+                                              with_vectors=False)
+            matches += [str(pt.id) for pt in page
+                        if str(pt.id).replace("-", "").startswith(compact)]
+            if offset is None:
+                break
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            raise MemoryError(
+                f"No memory with id {memory_id!r}. Ids come from store/list/search "
+                f"results -- use list_memories to find the right one.")
+        raise MemoryError(f"Id prefix {memory_id!r} matches {len(matches)} memories "
+                          f"({', '.join(matches[:5])}); give more characters.")
+
     def _get(self, memory_id: str):
-        found = self.client.retrieve(
-            collection_name=COLLECTION, ids=[memory_id], with_payload=True
-        )
+        memory_id = self.resolve_id(memory_id)
+        try:
+            found = self.client.retrieve(
+                collection_name=COLLECTION, ids=[memory_id], with_payload=True
+            )
+        except Exception as exc:  # never hand a raw database error to the agent
+            raise MemoryError(f"Could not read memory {memory_id!r}: "
+                              f"{type(exc).__name__}") from exc
         if not found:
             raise MemoryError(
                 f"No memory with id {memory_id!r}. Ids come from store/list/search "
