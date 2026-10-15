@@ -116,6 +116,19 @@ def _cmd_index_locked(cfg: Config, args) -> int:
                 )
             elapsed = time.perf_counter() - started
 
+            # Re-check memories that depend on what changed, pick up a newer
+            # per-test coverage run. Advisory; never fails the index.
+            try:
+                from memory_mcp.aftersync import after_sync
+
+                follow = after_sync(cfg, project.name, stats.changed_paths)
+                for m in follow.get("memories_flagged_suspect", []):
+                    console.print(f"  [yellow]memory suspect[/] {m['title']}: {m['reason']}")
+                if follow.get("coverage_ingested"):
+                    console.print("  [dim]per-test coverage ingested[/]")
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [dim]after-sync skipped: {exc}[/]")
+
             console.print(
                 f"[green]{project.name}[/]: {stats.files_indexed} files -> "
                 f"{stats.chunks} chunks in {elapsed:.1f}s "

@@ -18,7 +18,7 @@ import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pathspec
 
@@ -56,6 +56,13 @@ class Discovery:
         # directory holding the file. Root-only support quietly over-indexed
         # monorepos whose packages carry their own ignore rules.
         self._gitignore_specs: dict[str, pathspec.PathSpec | None] = {}
+        # Stat cache: rel_path -> [mtime_ns, size, sha256]. A sync used to
+        # read and hash EVERY file in the repo just to learn that almost
+        # none changed; with the cache an unchanged file costs one stat().
+        # Same trade-off git's index makes. Any mismatch falls back to a
+        # full read, so a stale cache can cost time but never correctness.
+        self._stat_cache: dict[str, list] = self._load_stat_cache()
+        self._stat_seen: dict[str, list] = {}
 
     # ------------------------------------------------------------------ setup
     def _spec_for_dir(self, rel_dir: str) -> pathspec.PathSpec | None:
@@ -103,7 +110,9 @@ class Discovery:
     def walk(self) -> list[DiscoveredFile]:
         found: list[DiscoveredFile] = []
         roots = (
-            [self.project.root / sub for sub in self.project.include_only]
+            # '..' would walk outside the project and index it under ../ paths.
+            [self.project.root / sub for sub in self.project.include_only
+             if ".." not in Path(sub).parts and not Path(sub).is_absolute()]
             if self.project.include_only
             else [self.project.root]
         )
@@ -115,6 +124,10 @@ class Discovery:
                 # Pruning in place stops os.walk from descending. This is the
                 # single most important performance decision in this module.
                 dirnames[:] = [d for d in dirnames if d not in self._ignore_dirs]
+                # os.walk already skips directory symlinks, but on Windows it
+                # descends into junctions -- which can point anywhere.
+                dirnames[:] = [d for d in dirnames
+                               if not _is_link_dir(os.path.join(dirpath, d))]
                 if self._respect_gitignore and dirnames:
                     # Prune gitignored directories too: correctness aside, a
                     # per-file check would still stat every file inside an
@@ -126,16 +139,51 @@ class Discovery:
                         if not self._gitignored(prefix + d, is_dir=True)
                     ]
 
+                rel_dir = Path(os.path.relpath(dirpath, self.project.root)).as_posix()
+                prefix = "" if rel_dir == "." else rel_dir + "/"
                 for filename in filenames:
                     full = Path(dirpath) / filename
-                    result = self.classify(full)
+                    # The walk already knows the relative path; resolve() per
+                    # file was the single biggest cost of a sync on Windows.
+                    result = self.classify(full, rel_hint=prefix + filename)
                     if result is not None:
                         found.append(result)
 
+        if not self.project.include_only:
+            self._save_stat_cache()
         return found
 
+    # ------------------------------------------------------------ stat cache
+    def _cache_path(self) -> Path:
+        return (Path(__file__).resolve().parent.parent / "data" / "statcache"
+                / f"{self.project.name}.json")
+
+    def _load_stat_cache(self) -> dict[str, list]:
+        import json
+
+        try:
+            data = json.loads(self._cache_path().read_text(encoding="utf-8"))
+            if data.get("root") == str(self.project.root):
+                return data.get("files") or {}
+        except (OSError, ValueError, AttributeError):
+            pass
+        return {}
+
+    def _save_stat_cache(self) -> None:
+        import contextlib
+        import json
+
+        path = self._cache_path()
+        with contextlib.suppress(OSError):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"root": str(self.project.root),
+                                       "files": self._stat_seen}), encoding="utf-8")
+            tmp.replace(path)
+
     # --------------------------------------------------------------- classify
-    def classify(self, path: Path, *, explain: bool = False) -> DiscoveredFile | None:
+    def classify(self, path: Path, *, explain: bool = False,
+                 rel_hint: str | None = None) -> DiscoveredFile | None:
         """Return a DiscoveredFile, or None with the reason recorded in .skips."""
 
         def skip(reason: str) -> None:
@@ -143,11 +191,14 @@ class Discovery:
             if explain:
                 print(f"  SKIP  {path}  ->  {reason}")
 
-        try:
-            rel = path.resolve().relative_to(self.project.root.resolve())
-        except ValueError:
-            skip("outside project root")
-            return None
+        if rel_hint is not None and not path.is_symlink():
+            rel = PurePosixPath(rel_hint)
+        else:
+            try:
+                rel = path.resolve().relative_to(self.project.root.resolve())
+            except ValueError:
+                skip("outside project root")
+                return None
         rel_posix = rel.as_posix()
 
         # any ignored directory anywhere in the path (covers --explain, where we
@@ -192,10 +243,16 @@ class Discovery:
             skip(f"unknown file type ({ext or 'no extension'})")
             return None
 
-        raw = self._read_bytes(path)
-        if raw is None:
-            skip("binary content")
-            return None
+        cached = self._stat_cache.get(rel_posix)
+        if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+            digest = cached[2]
+        else:
+            raw = self._read_bytes(path)
+            if raw is None:
+                skip("binary content")
+                return None
+            digest = hashlib.sha256(raw).hexdigest()
+        self._stat_seen[rel_posix] = [stat.st_mtime_ns, stat.st_size, digest]
 
         return DiscoveredFile(
             path=path,
@@ -206,7 +263,7 @@ class Discovery:
             doc_type=self._doc_type(rel_posix) if spec["chunker"] == "docs" else None,
             size=stat.st_size,
             mtime=stat.st_mtime,
-            content_hash=hashlib.sha256(raw).hexdigest(),
+            content_hash=digest,
         )
 
     def _language_spec(self, path: Path, ext: str) -> dict[str, str] | None:
@@ -286,3 +343,10 @@ def git_commit(root: Path) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() or None if out.returncode == 0 else None
+
+
+def _is_link_dir(path: str) -> bool:
+    try:
+        return os.path.islink(path) or os.path.isjunction(path)
+    except (OSError, AttributeError):
+        return False

@@ -34,3 +34,7 @@ jobs:
         run: uv run python -m compileall -q app indexer memory_mcp scripts tests
       - name: Unit tests (service-free)
         run: uv run tests/test_unit.py
+      - name: Feature tests (service-free)
+        run: uv run tests/test_features.py
+      - name: Repo-fact detection tests (service-free)
+        run: uv run tests/test_detect.py

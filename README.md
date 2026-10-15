@@ -42,26 +42,67 @@ re-makes a decision you already rejected months ago. rememory fixes that:
 
 ## What your assistant gets
 
-**14 tools + 1 prompt**, all annotated per the MCP spec (read-only tools
+**25 tools + 1 prompt**, all annotated per the MCP spec (read-only tools
 declare `readOnlyHint`; the single destructive tool declares
-`destructiveHint`):
+`destructiveHint`). Works with any MCP client — Claude Code / Desktop,
+Codex, Cursor, VS Code Copilot, Windsurf, Gemini CLI, Kiro, JetBrains, Zed.
+
+**Search and context**
 
 | Tool | What it does |
 |---|---|
-| `search_code` | Hybrid (semantic + exact-identifier) search over source code, cross-encoder reranked, `file:line` citations, per-result relevance score |
+| `search_code` | Hybrid (semantic + exact-identifier) search over source code, cross-encoder reranked, `file:line` citations. **Self-refreshing:** every returned file is re-checked against disk; if any changed since indexing, the project re-syncs and the search re-runs before answering |
 | `search_docs` | Same, over documentation — results carry the heading trail (`Guide > Setup > Docker`) |
-| `search_memory` | Knowledge from past sessions, cross-project by default, recency-aware |
-| `store_memory` | Save a decision / bug root cause / implementation note (validated; near-duplicates rejected with the existing memory's id) |
-| `update_memory` | Revise a memory — the old version is kept as history, never overwritten |
-| `delete_memory` | Remove exactly one memory by id (the only destructive tool; no bulk delete exists) |
-| `get_memory` / `list_memories` | Fetch full content by id / browse newest-first with pagination |
-| `get_briefing` | One-call project context block: **where you left off**, all active decisions in full, recent memories, staleness flags |
-| `save_session` | Session handoff: summary + next steps + files to read first; each save supersedes the previous |
-| `find_project` | Directory → knowledge base: at session start the assistant resolves the working directory to its registered project and links up automatically — no re-registering |
-| `register_project` | Create or repair a project's knowledge base from a prompt ("create a knowledge base for this project") — validates, registers, and indexes in one call |
-| `sync_index` | Re-index a project on demand so freshly written files are searchable immediately (a long first index continues in the background instead of timing out — call it again for the final counts) |
-| `memory_system_status` | Inventory + last-indexed times — distinguishes "nothing indexed" from "nothing matched" |
+| `get_symbol` | Exactly one function/class: its **live** body with line numbers, who calls it (attributed to the enclosing function), what it raises and calls — instead of reading a 600-line file |
+| `get_briefing` | Session-start context within a **character budget** (default 5k, was unbounded): latest handoff + open tasks + files to read first, decisions added/retired since that handoff, staleness warnings, active file claims, migration head + next decision number, the 10 newest decisions |
+| `repo_facts` | Facts agents guess wrong, read live: migration heads (Alembic, Django, Prisma, Rails, Drizzle, Laravel, EF Core, Flyway, …), CI gates (GitHub/GitLab/CircleCI/Azure/Bitbucket, pre-commit, Makefile, package.json, just, Taskfile, tox/nox, poe/hatch/pdm), toolchain + exact test/lint/typecheck commands, ID sequences (ADRs, `D-123` logs), configured constants and cross-file checks |
+| `tests_for` | Which tests cover this file / these lines — from per-test coverage data when available, else a labelled import/name heuristic (plus `vitest related` / `jest --findRelatedTests` for JS) — run 80 tests instead of the suite |
+| `find_project` / `register_project` | Directory → knowledge base / create or repair one from a prompt |
+| `sync_index` / `memory_system_status` | Manual re-index (rarely needed now) / inventory + last-indexed times |
+
+**Memory that knows when it is out of date**
+
+| Tool | What it does |
+|---|---|
+| `search_memory` | Past-session knowledge, cross-project, recency-aware. Every result carries `age_days`, its evidence class, and **SUSPECT** / **EXPIRED** labels when a file it depends on changed or its recheck date passed |
+| `store_memory` | Save a decision / bug / fix / recipe / vendor fact. Optional `depends_on` (files or `file::Symbol`, content-hashed — a change flags the memory suspect on the next sync), `evidence` (tested / read-at-source / reported / inferred), `recheck_after`, `supersedes`. Writing "supersedes D-123" retires the memory titled D-123 automatically. Returns `related` memories on the same topic so stale ones get fixed in the same step |
+| `update_memory` / `retire_memory` / `confirm_memory` | Rewrite (old version kept) / mark no-longer-true without a rewrite / record "checked, still true" |
+| `review_memories` | Probably-stale memories with reasons: a newer memory on the same topic, changed or deleted dependencies, missing files it names, expired recheck dates |
+| `lookup_error` | Paste an error → known fixes (`memory_type='fix'` with an `error_signature`; numbers/paths normalised) before investigating |
+| `get_memory` / `list_memories` / `delete_memory` / `save_session` | Full text by id / browse / remove one by id / where-we-left-off handoff |
+
+**Parallel agents**
+
+| Tool | What it does |
+|---|---|
+| `claim_files` / `release_files` / `list_claims` | Agents claim files or folders before editing; others see the conflict instead of clobbering work. Atomic across processes, auto-expiring |
+| `reserve_id` | Atomically take the next decision/ADR number so two agents never pick the same one |
 | `/kickoff` (prompt) | In Claude Code: `/mcp__rememory__kickoff <project>` loads the briefing and resumes work |
+
+### Automation — nothing to remember
+
+`setup` (and Repair) runs `scripts/install_hooks.py`, which installs, idempotently:
+
+* **Git hooks** in every registered project (`post-commit`, `post-merge`,
+  `post-checkout`, `post-rewrite`): a background, windowless incremental sync
+  of that project. A tracked hooks folder (husky, lefthook) is never touched.
+* **Agent hooks** in every installed IDE/CLI that supports them — Claude Code,
+  Codex, Cursor, VS Code Copilot, Gemini CLI, Kiro (session start), plus
+  Windsurf (edits only): the budgeted briefing is injected when a session
+  starts **and after context compaction**, and every file the agent writes
+  triggers a re-index. Existing configs are merged, never replaced, with a
+  `.rememory-backup`. Clients without hooks (Zed, Junie) follow the MCP
+  server instructions instead.
+
+Bursts of events coalesce: twenty saves or a rebase cost one or two syncs.
+
+### Cost-conscious by design
+
+* A sync stats files and hashes only those whose mtime/size changed (a git-index-style stat cache) — a no-change sync of a 5k-file repo takes ~0.4 s instead of ~1.9 s.
+* Code/docs vectors are int8-quantized in RAM with full-precision rescoring (measured: identical top hit on 100% of test queries, 99.5% top-10 overlap); the irreplaceable `memory` collection stays exact.
+* Search freshness checks compare mtimes first and hash only files that look changed.
+* The stale-memory review is cached per project and invalidated on every write.
+* Ollama models are released after 15 min (embedder) / 10 min (reranker) idle instead of 30.
 
 ## The desktop app
 
@@ -240,7 +281,8 @@ uv run -m indexer.cli index --project my-app
 
 From then on the background sync keeps it current (changed files re-indexed
 by content hash, deleted files purged, renames handled) — and the assistant
-can also call `sync_index` itself right after writing files.
+can also call `sync_index` itself, but rarely needs to: git and agent hooks
+re-index on every commit and edit, and searches re-sync stale files on their own.
 
 ---
 

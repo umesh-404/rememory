@@ -63,16 +63,18 @@ async def main() -> int:
                 "store_memory", "update_memory", "get_memory", "delete_memory",
                 "list_memories", "find_project", "register_project",
                 "save_session", "get_briefing", "memory_system_status",
-                "sync_index",
+                "sync_index", "retire_memory", "confirm_memory", "review_memories",
+                "lookup_error", "repo_facts", "reserve_id", "tests_for", "get_symbol",
+                "claim_files", "release_files", "list_claims",
             }
-            check("all 14 tools exposed", expected <= tools,
+            check(f"all {len(expected)} tools exposed", expected <= tools,
                   ", ".join(sorted(expected - tools)) or ", ".join(sorted(tools)))
 
             prompts = {p.name for p in (await session.list_prompts()).prompts}
             check("kickoff prompt exposed", "kickoff" in prompts, ", ".join(sorted(prompts)))
 
-            async def call(name: str, **args):
-                result = await session.call_tool(name, args)
+            async def call(tool_name: str, /, **args):
+                result = await session.call_tool(tool_name, args)
                 text = result.content[0].text if result.content else ""
                 return text
 
@@ -189,10 +191,100 @@ async def main() -> int:
             stale = await call("update_memory", memory_id=mem_id, title="should fail")
             check("updating a superseded memory rejected", stale.startswith("REJECTED"), stale[:80])
 
+            # ---- staleness: dependency + retire + confirm (self-cleaning) ----
+            dep_file = None
+            if root:
+                for cand in ("README.md", "pyproject.toml", "package.json", "CLAUDE.md"):
+                    if (Path(root) / cand).exists():
+                        dep_file = cand
+                        break
+            extra_ids: list[str] = []
+            if dep_file:
+                dep = json.loads(await call(
+                    "store_memory", project=write_project, memory_type="implementation",
+                    title="MCP test: dependency-tracked note",
+                    content=f"Test memory that depends on {dep_file}; safe to delete. "
+                            f"It verifies depends_on, evidence and confirm/retire.",
+                    depends_on=[dep_file], evidence="read-at-source", allow_duplicate=True,
+                ))
+                extra_ids.append(dep["stored"])
+                got = json.loads(await call("get_memory", memory_id=dep["stored"]))
+                check("depends_on recorded with a content hash",
+                      got.get("depends_paths") == [dep_file]
+                      and bool((got.get("depends_on") or [{}])[0].get("hash")), str(got)[:120])
+                conf = await call("confirm_memory", memory_id=dep["stored"])
+                check("confirm_memory records verification", "verified_at" in conf, conf[:80])
+                ret = await call("retire_memory", memory_id=dep["stored"],
+                                 reason="test cleanup: retired by the MCP verification run")
+                check("retire_memory marks it superseded", "retired" in ret, ret[:80])
+
+            fix = json.loads(await call(
+                "store_memory", project=write_project, memory_type="fix",
+                title="MCP test: ZZQ-TEST-ERROR fix",
+                content="Test fix memory: ZZQ-TEST-ERROR means the test fixture was not "
+                        "reset; reset it. Safe to delete.",
+                error_signature="ZZQ-TEST-ERROR 4711 fixture not reset", allow_duplicate=True,
+            ))
+            extra_ids.append(fix["stored"])
+            look = await call("lookup_error",
+                              error="Traceback ... ZZQ-TEST-ERROR 9999 fixture not reset",
+                              project=write_project)
+            check("lookup_error finds the fix by signature (numbers normalised)",
+                  fix["stored"] in look, look[:100])
+            nofix = await call("store_memory", project=write_project, memory_type="fix",
+                               title="no sig", content="x" * 60)
+            check("fix without error_signature rejected", nofix.startswith("REJECTED"))
+            nov = await call("store_memory", project=write_project, memory_type="vendor",
+                             title="no source", content="x" * 60)
+            check("vendor fact without source_url rejected", nov.startswith("REJECTED"))
+
+            review = await call("review_memories", project=write_project, limit=3)
+            check("review_memories answers", not review.startswith("REJECTED"), review[:80])
+
+            # ---- repo facts, claims, test map, symbols ----------------------
+            facts = json.loads(await call("repo_facts", project=write_project))
+            check("repo_facts answers", facts.get("project") == write_project, str(facts)[:80])
+
+            agent = "mcp-test-agent"
+            claim = json.loads(await call("claim_files", project=write_project, agent=agent,
+                                          paths=["zz_mcp_test_dir/"], ttl_minutes=5))
+            check("claim_files grants a free path", claim["granted"] == ["zz_mcp_test_dir"])
+            clash = json.loads(await call("claim_files", project=write_project,
+                                          agent="other-agent",
+                                          paths=["zz_mcp_test_dir/file.py"], ttl_minutes=5))
+            check("a second agent sees the conflict", bool(clash["conflicts"]), str(clash)[:90])
+            listed = await call("list_claims", project=write_project,
+                                paths=["zz_mcp_test_dir/x"])
+            check("list_claims shows the holder", agent in listed)
+            rel = json.loads(await call("release_files", project=write_project, agent=agent))
+            check("release_files frees it", rel["released"] >= 1)
+
+            tf = json.loads(await call("tests_for", project=write_project,
+                                       path=dep_file or "README.md"))
+            check("tests_for answers (coverage or labelled heuristic)",
+                  "source" in tf, str(tf)[:90])
+
+            if content_project and projects[content_project].get("code", 0):
+                hit = await call("search_code", query="function", project=content_project,
+                                 limit=1)
+                try:
+                    sym = (json.loads(hit) if hit.startswith("[") else
+                           json.loads(hit)["results"])[0].get("symbol")
+                except (ValueError, KeyError, IndexError):
+                    sym = None
+                if sym:
+                    got = await call("get_symbol", project=content_project,
+                                     name=sym.split(".")[-1], include_callers=False)
+                    check("get_symbol returns a live body",
+                          "definitions" in got or "No definition" in got, got[:90])
+
             # ---- briefing (read-only, safe on any project) ------------------
             briefing = await call("get_briefing", project=write_project)
             check("get_briefing renders the project header",
                   write_project in briefing, briefing[:80].replace("\n", " "))
+            check("get_briefing stays within budget", len(briefing) <= 5000, str(len(briefing)))
+            for mid in extra_ids:
+                await call("delete_memory", memory_id=mid)
 
             # ---- cleanup ---------------------------------------------------
             for mid in (mem_id, new_id):

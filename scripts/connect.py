@@ -145,11 +145,38 @@ VS CODE (GitHub Copilot agent mode)
     {{ "rememory": {{ "type": "stdio", "command": "{uv}", "args": [...same args...],
                     "env": {{ ...same env... }} }} }}
 
+OPENAI CODEX (CLI / IDE)
+  Add to ~/.codex/config.toml:
+    [mcp_servers.rememory]
+    command = {json.dumps(uv)}
+    args = {json.dumps(args)}
+    env = {{ {", ".join(f'{k} = {json.dumps(v)}' for k, v in env.items())} }}
+
+GEMINI CLI
+  Add the "rememory" entry to "mcpServers" in ~/.gemini/settings.json.
+
+KIRO
+  Add the "rememory" entry to "mcpServers" in ~/.kiro/settings/mcp.json.
+
+JETBRAINS (Junie)
+  Add the "rememory" entry to "mcpServers" in ~/.junie/mcp/mcp.json.
+
+ZED
+  Add to "context_servers" in Zed's settings.json:
+    "rememory": {{ "command": {json.dumps(uv)}, "args": [...same args...], "env": {{...}} }}
+
 ANY OTHER CLIENT
   Point it at the command above with the two UV_* variables from the
   "env" block set -- stdio transport, no API keys. The variables keep uv
   on the same Python as every other rememory launcher.
 ---------------------------------------------------------------
+
+AUTOMATION (set up by setup / Repair; re-run any time):
+  uv run scripts/install_hooks.py
+  -> git hooks re-index each project on commit/merge/checkout/rebase, and
+     every installed agent IDE with hooks (Claude Code, Codex, Cursor,
+     VS Code Copilot, Gemini CLI, Windsurf, Kiro) gets the briefing at session
+     start / after compaction and re-indexes files the agent edits.
 
 After connecting, register your projects in config/projects.yaml and run:
   uv run -m indexer.cli index --project <name>

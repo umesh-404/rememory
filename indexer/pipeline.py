@@ -40,6 +40,9 @@ class IndexStats:
     files_renamed: int = 0
     secrets_redacted: int = 0
     errors: list[str] = field(default_factory=list)
+    # Repo-relative paths re-indexed or purged this run -- what memory
+    # dependency checks (memory_mcp/aftersync.py) look at.
+    changed_paths: list[str] = field(default_factory=list)
 
 
 class Pipeline:
@@ -150,6 +153,7 @@ class Pipeline:
                         continue
                     store.delete_file(coll, project.name, stale_path)
                     stats.files_deleted += 1
+                    stats.changed_paths.append(stale_path)
                     # Rename = same content, new path. Counted separately only
                     # for honest reporting; the new path is (re)indexed in the
                     # main loop below regardless, because the embedded text
@@ -183,6 +187,7 @@ class Pipeline:
                 stats.errors.append(f"{disc.rel_path}: {type(exc).__name__}: {exc}")
                 continue
 
+            stats.changed_paths.append(disc.rel_path)
             if count:
                 stats.files_indexed += 1
                 stats.chunks += count

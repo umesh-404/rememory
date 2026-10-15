@@ -580,9 +580,18 @@ else { Ok "Start-menu shortcut created (via uv -- desktop extra was not installe
 Step "Verifying the installation (test suite)"
 & $Uv run tests/test_unit.py
 if ($LASTEXITCODE -ne 0) { Fail "unit tests failed." }
+& $Uv run tests/test_features.py
+if ($LASTEXITCODE -ne 0) { Fail "feature tests failed." }
 & $Uv run tests/test_roundtrip.py
 if ($LASTEXITCODE -ne 0) { Fail "end-to-end round trip failed." }
 Ok "all verification tests passed"
+
+# Automation: git hooks (re-index on commit/merge/checkout/rebase) in every
+# registered project, and session-start/post-edit hooks in every installed
+# agent IDE/CLI. Idempotent; merges into existing configs, never replaces.
+Step "Installing automation hooks (git + agent IDEs)"
+& $Uv run scripts/install_hooks.py
+if ($LASTEXITCODE -ne 0) { Info "hook install reported a problem -- rememory still works; re-run scripts/install_hooks.py later" }
 
 # ---------------------------------------------------------------------------
 Write-Host ""

@@ -66,7 +66,16 @@ app = FastMCP(
         "Search before assuming; store durable knowledge after significant work. "
         "AT SESSION START: call find_project with the working directory -- if it "
         "is already registered, continue with get_briefing (never re-register); "
-        "if not, offer to create a knowledge base with register_project."
+        "if not, offer to create a knowledge base with register_project. "
+        "(Skip get_briefing if a 'rememory briefing' was already injected.) "
+        "Saving effort: get_symbol returns one function plus its callers instead "
+        "of a whole file; tests_for names the tests covering a file so you run "
+        "those, not the full suite; lookup_error checks for a known fix before "
+        "you investigate a failure; repo_facts answers migration heads, CI gates, "
+        "commands and next ID numbers (take IDs with reserve_id). With other "
+        "agents in the same tree, claim_files before editing. "
+        "Memories can go stale: when one contradicts the code or a newer "
+        "decision, fix it (update_memory / retire_memory) instead of trusting it."
     ),
 )
 
@@ -184,6 +193,67 @@ def _bad_project(project: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------- search
+_FRESH_SYNC_WAIT = 12.0  # seconds a search may spend re-syncing stale hits
+# A file that keeps failing to index would make EVERY search re-sync and wait.
+# After one attempt for a given set of stale files, later searches within the
+# cooldown just flag them (and nudge a background sync) instead of waiting.
+_FRESH_COOLDOWN = 120.0
+_FRESH_TRIED: dict[str, tuple[float, frozenset]] = {}
+
+
+def _fresh_search(collection: str, query: str, project: str, *, limit: int,
+                  filters: dict, expand: bool) -> str:
+    """Search, verify the hits against the files on disk, and if any are
+    stale re-sync the project and search again -- so agents no longer need to
+    remember sync_index, and stop acting on code that has since changed."""
+    root = cfg.projects[project].root
+
+    def run():
+        res = searcher.search(collection, query, project=project, limit=limit,
+                              filters=filters, expand=expand)
+        return res, searcher.mark_freshness(res, root)
+
+    results, stale = run()
+    note = None
+    stale_paths = frozenset(r.source_path for r in results if r.extra.get("stale"))
+    tried = _FRESH_TRIED.get(project)
+    if stale and tried and tried[1] == stale_paths and time.time() - tried[0] < _FRESH_COOLDOWN:
+        _start_sync(project)  # background only; do not make this search wait again
+        note = (f"{stale} result(s) come from files edited since indexing (marked `stale`); "
+                f"a re-sync just ran without clearing them -- read those files directly.")
+    elif stale:
+        _FRESH_TRIED[project] = (time.time(), stale_paths)
+        job = _start_sync(project)
+        if not job["thread"].is_alive():
+            # A job that had ALREADY finished (uncollected) predates these
+            # edits: collect it and start a fresh one.
+            with _SYNC_LOCK:
+                if _SYNC_JOBS.get(project) is job:
+                    _sync_finish(project, job)
+            job = _start_sync(project)
+        job["thread"].join(timeout=_FRESH_SYNC_WAIT)
+        if job["thread"].is_alive():
+            note = (f"{stale} result(s) come from files edited since indexing (marked "
+                    f"`stale`). A re-sync is running in the background; read those "
+                    f"files directly before relying on them.")
+        else:
+            with _SYNC_LOCK:
+                if _SYNC_JOBS.get(project) is job:
+                    _sync_finish(project, job)
+            results, stale = run()
+            if stale:
+                _start_sync(project)  # the job we waited on may have predated the edit
+            note = ("Files had changed since indexing; the project was re-synced and "
+                    "these results reflect the current files." if not stale else
+                    f"Re-synced, but {stale} result(s) are still flagged `stale` (another "
+                    f"sync was busy or a file failed) -- read those files directly.")
+    if not results:
+        return _results(results)
+    if note:
+        return _dump({"note": note, "results": [r.to_dict() for r in results]})
+    return _results(results)
+
+
 @app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
 @_guard
 def search_code(
@@ -209,18 +279,17 @@ def search_code(
     "method", "interface", "module"). Set expand=true to merge each hit with
     its neighbouring chunks for surrounding context. Results include file:line
     locations you can open directly.
+
+    Freshness is handled for you: every returned file is re-hashed, and if any
+    changed since it was indexed the project is re-synced and the search re-run
+    before answering. A hit still marked `stale` means the sync could not finish
+    in time -- read the actual file before relying on it.
     """
     if err := _bad_project(project):
         return err
-    return _results(
-        searcher.search(
-            "code",
-            query,
-            project=project,
-            limit=_clamp(limit, 1, 25),
-            filters={"language": language, "symbol_type": symbol_type},
-            expand=expand,
-        )
+    return _fresh_search(
+        "code", query, project, limit=_clamp(limit, 1, 25),
+        filters={"language": language, "symbol_type": symbol_type}, expand=expand,
     )
 
 
@@ -248,15 +317,9 @@ def search_docs(
     """
     if err := _bad_project(project):
         return err
-    return _results(
-        searcher.search(
-            "docs",
-            query,
-            project=project,
-            limit=_clamp(limit, 1, 25),
-            filters={"doc_type": doc_type},
-            expand=expand,
-        )
+    return _fresh_search(
+        "docs", query, project, limit=_clamp(limit, 1, 25),
+        filters={"doc_type": doc_type}, expand=expand,
     )
 
 
@@ -280,15 +343,60 @@ def search_memory(
     memory_type narrows to: decision, feature, api, bug, deployment,
     implementation, design. Superseded versions are excluded unless
     include_superseded=true.
+
+    A memory is a claim from the past, not ground truth: each result carries
+    age_days. If one disagrees with the code, CLAUDE.md or a newer memory,
+    believe the newer source and fix the memory (update_memory/retire_memory).
     """
     if err := _bad_project(project):
         return err
     filters: dict[str, Any] = {"memory_type": memory_type}
     if not include_superseded:
         filters["status"] = "active"
-    return _results(
-        searcher.search("memory", query, project=project, limit=_clamp(limit, 1, 25), filters=filters)  # noqa: E501
-    )
+    results = searcher.search("memory", query, project=project,
+                              limit=_clamp(limit, 1, 25), filters=filters)
+    _label_memories(results)
+    return _results(results)
+
+
+def _label_memories(results) -> None:
+    """Attach the trust signals a reader needs next to each memory result."""
+    from datetime import UTC, datetime
+
+    from .briefing import _age_days
+
+    now = datetime.now(UTC)
+    today = now.date().isoformat()
+    ids = [r.id for r in results]
+    payloads = {}
+    if ids:
+        try:
+            for pt in memory_store.client.retrieve(
+                    collection_name="memory", ids=ids,
+                    with_payload=["suspect", "evidence", "verified_at", "recheck_after",
+                                  "source_url", "read_at", "error_signature", "depends_on"]):
+                payloads[str(pt.id)] = pt.payload or {}
+        except Exception as exc:
+            print(f"label lookup failed: {exc}", file=sys.stderr)
+    for r in results:
+        age = _age_days(r.extra.get("created_at"), now)
+        if age is not None:
+            r.extra["age_days"] = age
+        p = payloads.get(r.id, {})
+        for key in ("evidence", "source_url", "read_at", "error_signature"):
+            if p.get(key):
+                r.extra[key] = p[key]
+        if p.get("verified_at"):
+            r.extra["verified_days_ago"] = _age_days(p["verified_at"], now)
+        if p.get("depends_on"):
+            r.extra["depends_on"] = [d.get("ref") for d in p["depends_on"]]
+        if p.get("suspect"):
+            r.extra["SUSPECT"] = (f"{p['suspect']} -- check the code before trusting this, "
+                                  f"then confirm_memory / update_memory / retire_memory")
+        if p.get("recheck_after"):
+            r.extra["recheck_after"] = str(p["recheck_after"])[:10]
+            if str(p["recheck_after"])[:10] < today:
+                r.extra["EXPIRED"] = "past its recheck date -- re-read the source first"
 
 
 # ---------------------------------------------------------------------- memory
@@ -301,6 +409,12 @@ def store_memory(
     content: str,
     tags: list[str] | None = None,
     allow_duplicate: bool = False,
+    supersedes: str | None = None,
+    depends_on: list[str] | None = None,
+    evidence: str | None = None,
+    source_url: str | None = None,
+    recheck_after: str | None = None,
+    error_signature: str | None = None,
 ) -> str:
     """Store a piece of durable development knowledge for future sessions.
 
@@ -310,22 +424,76 @@ def store_memory(
     this conversation. Do NOT store conversation transcripts, trivia, or
     anything derivable by reading the code; store conclusions.
 
-    memory_type: decision | feature | api | bug | deployment | implementation | design.
+    memory_type: decision | feature | api | bug | deployment | implementation | design
+      | fix (an error and its fix -- set error_signature to the distinctive error
+        text; lookup_error finds it next time)
+      | recipe (an exact command sequence that WORKED -- deploy, git, test runs)
+      | vendor (a third-party price/rate/API behaviour -- requires source_url and
+        evidence; expires after 30 days unless recheck_after says otherwise).
     Keep content focused (40-8000 chars). Add 2-5 lowercase tags for browsing.
     Returns the stored memory's id -- reference it in update/delete.
+
+    depends_on: repo paths (optionally path::Symbol) this knowledge is ABOUT.
+    When one changes, the memory is automatically flagged suspect -- give it for
+    any memory describing how specific code works.
+    evidence: tested | read-at-source | reported | inferred -- how you know.
+    recheck_after: ISO date or a number of days after which it must be re-verified.
+    Writing "supersedes D-123" (any ID-123 form) in the content automatically
+    retires the active memory whose title carries that id.
 
     If a very similar active memory already exists the store is rejected with
     its id -- update_memory that id if yours replaces it, or retry with
     allow_duplicate=true only if the two are genuinely distinct facts.
+
+    supersedes: id of an existing memory this one REPLACES (e.g. a new decision
+    that reverses an old one). The old one is marked superseded in the same
+    call, so no stale version is left active.
+
+    The response lists `related` active memories on the same topic. READ THEM:
+    if your new memory makes any of them wrong, retire_memory or update_memory
+    it now -- this is how stale facts stop outliving the change that killed them.
     """
+    if supersedes:
+        try:
+            old = memory_store._get(supersedes)
+        except MemoryError as exc:
+            return f"REJECTED: {exc}"
+        if (old.payload or {}).get("project") != project:
+            return "REJECTED: supersedes must name a memory in the same project."
+        if (old.payload or {}).get("status") != "active":
+            return f"REJECTED: memory {supersedes} is already superseded."
     try:
         m = memory_store.store(
             project=project, memory_type=memory_type, title=title,
             content=content, tags=tags, allow_duplicate=allow_duplicate,
+            supersedes=supersedes, depends_on=depends_on, evidence=evidence,
+            source_url=source_url, recheck_after=recheck_after,
+            error_signature=error_signature,
         )
     except MemoryError as exc:
         return f"REJECTED: {exc}"
-    return _dump({"stored": m.id, "title": m.title, "type": m.memory_type, "project": m.project})
+    out: dict[str, Any] = {"stored": m.id, "title": m.title, "type": m.memory_type,
+                           "project": m.project}
+    auto = m.auto_superseded or {}
+    if auto.get("retired"):
+        out["auto_superseded"] = auto["retired"]
+    if auto.get("candidates"):
+        out["supersede_candidates"] = auto["candidates"]
+        out["supersede_note"] = ("Several active memories start with the id you said this "
+                                 "replaces, so none was retired automatically. Retire the "
+                                 "right one with retire_memory(id, reason, replaced_by).")
+    if supersedes:
+        memory_store.client.set_payload(
+            collection_name="memory", payload={"superseded_by": m.id},
+            points=[supersedes], wait=True,
+        )
+        out["superseded"] = supersedes
+    if m.related:
+        out["related"] = m.related
+        out["check"] = ("These active memories cover the same topic. If the one you just "
+                        "stored makes any of them outdated, retire_memory(id, reason, "
+                        "replaced_by) or update_memory it now.")
+    return _dump(out)
 
 
 @app.tool(annotations=ToolAnnotations(destructiveHint=False, idempotentHint=False, openWorldHint=False))  # noqa: E501
@@ -335,6 +503,11 @@ def update_memory(
     title: str | None = None,
     content: str | None = None,
     tags: list[str] | None = None,
+    depends_on: list[str] | None = None,
+    evidence: str | None = None,
+    source_url: str | None = None,
+    recheck_after: str | None = None,
+    error_signature: str | None = None,
 ) -> str:
     """Revise an existing memory when it is outdated or wrong.
 
@@ -344,7 +517,10 @@ def update_memory(
     of the memory, find its exact id via list_memories or search_memory first.
     """
     try:
-        m = memory_store.update(memory_id, title=title, content=content, tags=tags)
+        m = memory_store.update(memory_id, title=title, content=content, tags=tags,
+                                depends_on=depends_on, evidence=evidence,
+                                source_url=source_url, recheck_after=recheck_after,
+                                error_signature=error_signature)
     except MemoryError as exc:
         return f"REJECTED: {exc}"
     return _dump({"superseded": memory_id, "new_id": m.id, "title": m.title})
@@ -384,6 +560,58 @@ def delete_memory(memory_id: str) -> str:
     return _dump(result)
 
 
+@app.tool(annotations=ToolAnnotations(destructiveHint=False, openWorldHint=False))
+@_guard
+def retire_memory(memory_id: str, reason: str, replaced_by: str | None = None) -> str:
+    """Mark a memory as no longer true, WITHOUT writing a replacement.
+
+    Use when a memory is outdated and there is nothing to rewrite it into --
+    the feature was removed, the decision was reversed by another memory
+    (pass that memory's id as replaced_by), the file it describes is gone.
+    Non-destructive: the content and your reason stay in history
+    (include_superseded=true shows it); it just stops appearing as current
+    knowledge in searches and briefings. Prefer this over delete_memory.
+    """
+    try:
+        return _dump(memory_store.retire(memory_id, reason=reason, replaced_by=replaced_by))
+    except MemoryError as exc:
+        return f"REJECTED: {exc}"
+
+
+@app.tool(annotations=ToolAnnotations(destructiveHint=False, idempotentHint=True, openWorldHint=False))  # noqa: E501
+@_guard
+def confirm_memory(memory_id: str) -> str:
+    """Record that you checked a flagged memory against the current code/docs
+    and it is STILL TRUE. review_memories and briefings stop flagging it
+    (until an even newer memory on the same topic appears)."""
+    try:
+        return _dump(memory_store.confirm(memory_id))
+    except MemoryError as exc:
+        return f"REJECTED: {exc}"
+
+
+@app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@_guard
+def review_memories(project: str, limit: int = 15) -> str:
+    """List active memories that are PROBABLY STALE, with the reason for each.
+
+    Flags: a newer memory covers the same topic (likely changed the story),
+    the memory names repo files that no longer exist, or an operational note
+    is old and never re-confirmed. For each one, check it against the code /
+    CLAUDE.md, then: update_memory (rewrite it), retire_memory (no longer
+    true), or confirm_memory (still true). Run it when the briefing shows
+    'Check before trusting', or after a big change lands.
+    """
+    if err := _bad_project(project):
+        return err
+    items = memory_store.review(project, root=cfg.projects[project].root,
+                                limit=_clamp(limit, 1, 50))
+    if not items:
+        return "No likely-stale memories found."
+    return _dump({"count": len(items), "items": items,
+                  "next": "For each: update_memory, retire_memory, or confirm_memory."})
+
+
 @app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
 @_guard
 def list_memories(
@@ -420,6 +648,274 @@ def list_memories(
         "has_more": page["has_more"],
         "items": items,
     })
+
+
+# ---------------------------------------------------------------- error fixes
+@app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@_guard
+def lookup_error(error: str, project: str | None = None, limit: int = 5) -> str:
+    """Has this error been seen and fixed before? CALL THIS FIRST when a
+    command, test or CI step fails, before investigating.
+
+    Paste the distinctive part of the error (a message, code, or the last line
+    of a traceback). Exact/substring matches against recorded error signatures
+    rank first, then semantic matches among stored fixes. When you fix a NEW
+    error, store it: store_memory(memory_type='fix', error_signature=<error
+    text>, content=<cause + fix>) so the next agent gets it in one step.
+    """
+    if err := _bad_project(project):
+        return err
+    import re as _re
+
+    from qdrant_client import models as qm
+
+    def norm(t: str) -> str:
+        t = _re.sub(r"0x[0-9a-f]+|\b\d+\b", "#", t.lower())
+        return " ".join(_re.sub(r"[\\/][\w.\\/-]+", "/PATH", t).split())
+
+    needle = norm(error)[:400]
+    if len(needle) < 4:
+        return "REJECTED: paste the distinctive part of the error (a message or code)."
+    must = [qm.FieldCondition(key="memory_type", match=qm.MatchValue(value="fix")),
+            qm.FieldCondition(key="status", match=qm.MatchValue(value="active"))]
+    if project:
+        must.append(qm.FieldCondition(key="project", match=qm.MatchValue(value=project)))
+    points, _ = memory_store.client.scroll(
+        collection_name="memory", scroll_filter=qm.Filter(must=must), limit=2000,
+        with_payload=True, with_vectors=False)
+    exact = []
+    for pt in points:
+        sig = norm((pt.payload or {}).get("error_signature") or "")
+        # sig-in-needle: the stored signature appears in the pasted output.
+        # needle-in-sig only for a needle long enough to be distinctive --
+        # "error" is a substring of almost every signature.
+        if sig and (sig in needle or (len(needle) >= 12 and needle in sig)):
+            pl = pt.payload or {}
+            exact.append({"id": str(pt.id), "match": "error signature",
+                          "project": pl.get("project"), "title": pl.get("title"),
+                          "error_signature": pl.get("error_signature"),
+                          "fix": pl.get("content")})
+    semantic = searcher.search("memory", error, project=project, limit=_clamp(limit, 1, 10),
+                               filters={"memory_type": "fix", "status": "active"})
+    seen = {e["id"] for e in exact}
+    sem = [dict(r.to_dict(), match="similar") for r in semantic
+           if r.id not in seen and r.extra.get("rerank", 1) >= 0.25]
+    if not exact and not sem:
+        return ("No known fix recorded for this error. Investigate; once fixed, store it with "
+                "store_memory(memory_type='fix', error_signature=..., content=cause + fix).")
+    return _dump({"known_fixes": exact[:limit], "similar": sem[:limit]})
+
+
+# ------------------------------------------------------------------ repo facts
+@app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@_guard
+def repo_facts(project: str, topic: str | None = None) -> str:
+    """Facts agents get wrong when they guess, read live from the repo:
+    the alembic head (use as down_revision), the CI gate list, the next free
+    decision/ID number per configured sequence (plus pending reservations),
+    configured constants (e.g. append-only tables) and cross-file checks (e.g.
+    which rows every alarm code needs, and any currently missing).
+
+    topic narrows the answer: alembic | ci | ids | constants | checks | notes,
+    or the name of one configured constant/check. Never guess these -- and
+    never take an ID number from here without reserve_id.
+    """
+    if err := _bad_project(project):
+        return err
+    from . import facts as _facts
+    from . import localdb
+
+    proj = cfg.projects[project]
+    out = _facts.collect(
+        proj, topic,
+        reservations_fn=lambda seq, above: localdb.reservations(project, seq, above))
+    return _dump(out)
+
+
+@app.tool(annotations=ToolAnnotations(destructiveHint=False, openWorldHint=False))
+@_guard
+def reserve_id(project: str, sequence: str, agent: str = "", note: str = "") -> str:
+    """Atomically take the next free number in an ID sequence (e.g. the next
+    decision number D-791) so parallel agents never collide.
+
+    Computes the highest number already used in the repo, then reserves the
+    next one above it AND above every earlier reservation -- in one locked
+    step shared by every agent on this machine. Say who you are (agent) and
+    what it is for (note); use the returned id, do not compute your own.
+    """
+    if err := _bad_project(project):
+        return err
+    from . import facts as _facts
+    from . import localdb
+
+    proj = cfg.projects[project]
+    try:
+        floor = _facts.sequence_floor(proj, sequence)
+    except KeyError:
+        known = list((proj.facts or {}).get("id_sequences") or {})
+        return (f"REJECTED: no id sequence {sequence!r} configured for {project}. "
+                f"Configured: {', '.join(known) or 'none'} (add one under facts.id_sequences "
+                f"in config/projects.yaml).")
+    number = localdb.reserve(project, sequence, floor, agent=agent, note=note)
+    ident = _facts.sequence_format(proj, sequence).format(n=number)
+    return _dump({"reserved": ident, "highest_in_repo_was": floor,
+                  "note": "Yours. Write it into the repo soon; the reservation keeps other "
+                          "agents off it meanwhile."})
+
+
+# ---------------------------------------------------------------- test mapping
+@app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@_guard
+def tests_for(project: str, path: str, start_line: int | None = None,
+              end_line: int | None = None) -> str:
+    """Which tests cover this file (or these lines)? Use BEFORE running a slow
+    suite: run just these tests to check a change in minutes, not hours.
+
+    Answered from per-test coverage data (rememory ingests the project's
+    .coverage automatically after each run recorded with per-test contexts);
+    without that it falls back to a clearly-labelled heuristic (tests that
+    import the module or share its name) and tells you how to record contexts.
+    path is repo-relative, e.g. apps/api/engine/thinnest.py.
+    """
+    if err := _bad_project(project):
+        return err
+    from . import testmap
+
+    proj = cfg.projects[project]
+    testmap.auto_ingest(project, proj.root)
+    from .symbols import inside
+
+    if not inside(proj.root, path):
+        return f"REJECTED: {path!r} is not inside {project}'s root; pass a repo-relative path."
+    return _dump(testmap.tests_for(project, proj.root, path, start_line, end_line))
+
+
+# ------------------------------------------------------------- symbol lookup
+@app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@_guard
+def get_symbol(project: str, name: str, path: str | None = None,
+               include_callers: bool = True, max_lines: int = 250) -> str:
+    """Exactly one function/class/method: its current body with line numbers,
+    who calls it, what it raises and what it calls -- instead of reading the
+    whole file.
+
+    name: the symbol ('lend_platform_line', 'VoiceRouter', 'VoiceRouter.route').
+    path: optional repo-relative file to disambiguate. The body is read LIVE
+    from disk (fresh even before the index syncs). Use the returned line range
+    for edits; callers are attributed to their enclosing function.
+    """
+    if err := _bad_project(project):
+        return err
+    from pathlib import Path as _Path
+
+    from qdrant_client import models as qm
+
+    from . import symbols
+
+    proj = cfg.projects[project]
+    root = _Path(proj.root)
+    last = name.split(".")[-1]
+    must = [qm.FieldCondition(key="project", match=qm.MatchValue(value=project))]
+    if path:
+        must.append(qm.FieldCondition(key="source_path",
+                                      match=qm.MatchValue(value=path.replace("\\", "/"))))
+    candidates: list[tuple[str, int | None]] = []
+    for sym in dict.fromkeys([name, last]):
+        pts, _ = searcher.client.scroll(
+            collection_name="code",
+            scroll_filter=qm.Filter(must=must + [qm.FieldCondition(
+                key="symbol_name", match=qm.MatchValue(value=sym))]),
+            limit=20, with_payload=["source_path", "start_line", "symbol_name"],
+            with_vectors=False)
+        for p in pts:
+            pl = p.payload or {}
+            candidates.append((pl.get("source_path"), pl.get("start_line")))
+    if not candidates:
+        hits = searcher.search("code", name, project=project, limit=10, rerank=False,
+                               filters={"source_path": path.replace("\\", "/")} if path else None)
+        for r in hits:
+            if r.symbol and (r.symbol == name or r.symbol.split(".")[-1] == last):
+                candidates.append((r.source_path, r.start_line))
+    if path and not candidates:
+        candidates.append((path.replace("\\", "/"), None))
+    seen, defs = set(), []
+    for rel, line in candidates:
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        span = symbols.locate(root, rel, last, line)
+        if span:
+            defs.append((rel, span))
+    if not defs:
+        return (f"No definition of {name!r} found in {project}. Try search_code for a fuzzy "
+                f"match, or pass path= if you know the file.")
+    out: dict[str, Any] = {"definitions": []}
+    for rel, (a, b) in defs[:3]:
+        lines = (root / rel).read_text(encoding="utf-8", errors="replace").splitlines()
+        body_lines = lines[a - 1:b]
+        shown = body_lines[:max(20, min(max_lines, 1000))]
+        body = "\n".join(f"{a + i:>5}  {t}" for i, t in enumerate(shown))
+        entry: dict[str, Any] = {"location": f"{rel}:{a}-{b}", "lines": b - a + 1,
+                                 "body": body}
+        if len(shown) < len(body_lines):
+            entry["truncated"] = f"showing {len(shown)} of {len(body_lines)} lines"
+        entry.update(symbols.analyse_body("\n".join(body_lines), rel.endswith(".py"), name))
+        if include_callers:
+            entry["callers"] = symbols.callers(root, name, exclude=(rel, a, b))
+        out["definitions"].append(entry)
+    if len(defs) > 3:
+        out["more_definitions"] = [f"{r}:{s[0]}" for r, s in defs[3:10]]
+    return _dump(out)
+
+
+# ------------------------------------------------------------------ file claims
+@app.tool(annotations=ToolAnnotations(destructiveHint=False, openWorldHint=False))
+@_guard
+def claim_files(project: str, agent: str, paths: list[str], note: str = "",
+                ttl_minutes: int = 120, force: bool = False) -> str:
+    """Claim files/folders you are about to edit so parallel agents in the same
+    tree stay off them. CALL BEFORE EDITING when other agents may be working.
+
+    agent: a stable name for yourself ('trial-agent', 'emails-agent'). paths:
+    repo-relative files or folders (a folder covers everything below it).
+    Paths already held by another agent come back as `conflicts` and are NOT
+    taken -- wait, pick other work, or coordinate; force=true only with the
+    user's say-so. Claims expire after ttl_minutes; release_files when done.
+    """
+    if err := _bad_project(project):
+        return err
+    if not agent.strip():
+        return "REJECTED: give agent a stable name so others know who holds the claim."
+    from . import localdb
+
+    res = localdb.claim(project, agent.strip(), paths, note=note,
+                        ttl_minutes=_clamp(ttl_minutes, 5, 24 * 60), force=force)
+    return _dump(res)
+
+
+@app.tool(annotations=ToolAnnotations(destructiveHint=False, idempotentHint=True, openWorldHint=False))  # noqa: E501
+@_guard
+def release_files(project: str, agent: str, paths: list[str] | None = None) -> str:
+    """Release your file claims when the edit is done (all of yours if paths
+    is omitted). Do this before finishing so others are not blocked."""
+    if err := _bad_project(project):
+        return err
+    from . import localdb
+
+    return _dump({"released": localdb.release(project, agent.strip(), paths)})
+
+
+@app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@_guard
+def list_claims(project: str, paths: list[str] | None = None) -> str:
+    """Who is editing what right now. Pass paths to ask about specific files
+    (e.g. before stopping a run or touching a shared module)."""
+    if err := _bad_project(project):
+        return err
+    from . import localdb
+
+    claims = localdb.list_claims(project, paths)
+    return _dump({"claims": claims}) if claims else "No active claims."
 
 
 # ---------------------------------------------------------------- registration
@@ -525,12 +1021,16 @@ def register_project(
     data = data or {}
     projects = data.get("projects") or {}
     existed = slug in projects
+    previous = projects.get(slug) or {}
     projects[slug] = {
         "root": str(root_path),
         "description": description.strip(),
-        "extra_ignore_dirs": (projects.get(slug) or {}).get("extra_ignore_dirs", []),
-        "include_only": (projects.get(slug) or {}).get("include_only", []),
+        "extra_ignore_dirs": previous.get("extra_ignore_dirs", []),
+        "include_only": previous.get("include_only", []),
     }
+    # Keep any hand-written `facts:` block -- re-registering must not wipe it.
+    if previous.get("facts"):
+        projects[slug]["facts"] = previous["facts"]
     data["projects"] = projects
     registry.write_text(
         "# rememory project registry (yours; gitignored).\n"
@@ -564,6 +1064,15 @@ def register_project(
                 cfg.projects[slug], store, embedder, only_changed=True
             )
 
+    from .aftersync import after_sync
+    from .hooks import install_git_hooks
+
+    after_sync(cfg, slug, stats.changed_paths, memory_store)
+    try:
+        hooks_status = install_git_hooks(slug, root_path)
+    except Exception as exc:  # never fail a registration over automation
+        hooks_status = f"git hooks not installed: {exc}"
+
     return _dump({
         "registered": slug,
         "updated_existing": existed,
@@ -572,6 +1081,7 @@ def register_project(
         "chunks": stats.chunks,
         "secrets_redacted": stats.secrets_redacted,
         "failed": stats.files_failed,
+        "auto_sync": hooks_status,
         "note": f"Knowledge base ready. Use project='{slug}' with search_code/"
                 f"search_docs/store_memory/get_briefing. Background sync keeps "
                 f"it current from here.",
@@ -643,92 +1153,49 @@ def save_session(
 # -------------------------------------------------------------------- briefing
 @app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
 @_guard
-def get_briefing(project: str) -> str:
-    """Compiled project context block -- CALL THIS ONCE AT SESSION START when
-    beginning work on a registered project.
+def get_briefing(project: str, budget: int = 5000) -> str:
+    """Compact project context -- CALL THIS ONCE AT SESSION START when beginning
+    work on a registered project (skip it if a "rememory briefing" block was
+    already injected into this session automatically).
 
-    This is the equivalent of a memory provider's profile injection: instead
-    of you issuing several searches to reconstruct project state, it returns
-    one block with the project description, all active decisions (full text --
-    decisions are load-bearing), recent memories of other types, doc/code
-    inventory, and freshness warnings for old operational notes. After
-    reading it, search only for the specifics you need.
+    Returns, within ~budget characters (default 5000, max 40000): the latest
+    handoff with its open tasks and files to read first, decisions added or
+    retired since that handoff, warnings (index behind the last commit,
+    memories that are suspect or probably replaced, files other agents have
+    claimed), key repo facts (migration head, next free decision number), the
+    10 newest active decisions as excerpts, and titles of verified recipes.
+    It is an index, not an archive: follow up with get_memory / search_memory.
     """
     if err := _bad_project(project):
         return err
-    from datetime import UTC, datetime
+    return _briefing_text(project, budget)
 
-    from qdrant_client import models as qm
+
+def _briefing_text(project: str, budget: int) -> str:
+    from . import facts as _facts
+    from . import localdb
+    from .briefing import build_briefing
 
     proj = cfg.projects[project]
-    lines: list[str] = [f"# {project}", ""]
-    if proj.description:
-        lines += [proj.description, ""]
-
-    project_filter = qm.Filter(
-        must=[qm.FieldCondition(key="project", match=qm.MatchValue(value=project))]
-    )
-    stats = {
-        c: searcher.client.count(collection_name=c, count_filter=project_filter, exact=True).count
-        for c in ("code", "docs", "memory")
-    }
-    lines += [f"Indexed: {stats['code']} code chunks, {stats['docs']} doc chunks, "
-              f"{stats['memory']} memories.", ""]
-
-    memories = memory_store.list_memories(project=project, limit=100)
-    now = datetime.now(UTC)
-
-    def age_days(m: dict) -> int | None:
-        try:
-            return (now - datetime.fromisoformat(m["created_at"])).days
-        except (KeyError, TypeError, ValueError):
-            return None
-
-    sessions = [m for m in memories if m["memory_type"] == "session"]
-    decisions = [m for m in memories if m["memory_type"] == "decision"]
-    others = [m for m in memories if m["memory_type"] not in ("decision", "session")]
-
-    # The session handoff comes FIRST: continuing where the last session
-    # stopped is the single most valuable thing a briefing can do, and its
-    # FILES TO READ FIRST list is what lets this session open three files
-    # instead of thirty.
-    if sessions:
-        latest = memory_store._get(sessions[0]["id"]).payload or {}
-        age = age_days(sessions[0])
-        lines += [
-            f"## Where you left off ({sessions[0]['created_at'][:16]}"
-            + (f", {age}d ago" if age is not None else "") + ")",
-            latest.get("content", sessions[0]["preview"]),
-            "",
-        ]
-
-    if decisions:
-        lines.append("## Active decisions (full text -- these are binding)")
-        for m in decisions:
-            full = memory_store._get(m["id"]).payload or {}
-            lines += [f"\n### {m['title']}", full.get("content", m["preview"])]
-        lines.append("")
-
-    if others:
-        lines.append("## Other recent memories (previews -- get_memory for full text)")
-        for m in others[:10]:
-            age = age_days(m)
-            # Operational knowledge rots faster than decisions; flag it rather
-            # than silently presenting a stale runbook as current truth.
-            stale = (" [>90 days old -- verify still true]"
-                     if age is not None and age > 90
-                     and m["memory_type"] in ("deployment", "bug", "api") else "")
-            lines.append(f"- [{m['memory_type']}] {m['title']} ({m['id'][:8]}){stale}")
-            lines.append(f"  {m['preview']}")
-        lines.append("")
-
-    lines += [
-        "## Working with this project",
-        "- search_docs / search_code for specifics (hybrid + reranked; trust `rerank` >= 0.3)",
-        "- store_memory after significant work; update_memory when a decision changes",
-        "- sync_index after writing files so they are searchable immediately",
-    ]
-    return "\n".join(lines)
+    try:
+        review = memory_store.review(project, root=proj.root, limit=10)
+    except Exception as exc:  # advisory -- never fail the briefing over it
+        print(f"review failed: {exc}", file=sys.stderr)
+        review = []
+    facts: dict[str, Any] = {}
+    try:
+        facts.update(_facts.collect(proj, "alembic"))
+        facts.update(_facts.collect(
+            proj, "ids",
+            reservations_fn=lambda seq, above: localdb.reservations(project, seq, above)))
+    except Exception as exc:
+        print(f"facts failed: {exc}", file=sys.stderr)
+    try:
+        claims = localdb.list_claims(project)
+    except Exception:
+        claims = []
+    return build_briefing(cfg, searcher.client, memory_store, project, max_chars=budget,
+                          review=review, facts=facts, claims=claims)
 
 
 @app.prompt(name="kickoff", description="Load the project briefing and start work with full context")  # noqa: E501
@@ -836,6 +1303,34 @@ def sync_index(project: str) -> str:
     if not proj.root.exists():
         return f"REJECTED: project root does not exist: {proj.root}"
 
+    job = _start_sync(project)
+
+    # Wait briefly: the common case (a warm project with few changes) finishes
+    # in well under a second, and answering with the real counts is much more
+    # useful than telling the caller to check back.
+    thread = job["thread"]
+    if thread.is_alive():
+        thread.join(timeout=_SYNC_GRACE_SECONDS)
+    if thread.is_alive():
+        return _dump({
+            "project": project,
+            "status": "running",
+            "elapsed_seconds": round(time.time() - job["started"], 1),
+            "note": "Still indexing in the background rather than timing out "
+                    "this request. Call sync_index again for the final counts; "
+                    "searches already work against whatever has been written "
+                    "so far.",
+        })
+    # Finished (just now, or earlier and uncollected) -- hand back the result.
+    with _SYNC_LOCK:
+        return _dump(_sync_finish(project, job))
+
+
+def _start_sync(project: str) -> dict:
+    """Find or start the background sync job for a project (never two at
+    once). Shared by sync_index and the self-refreshing searches."""
+    proj = cfg.projects[project]
+
     from indexer.pipeline import Pipeline
     from indexer.store import Store
 
@@ -869,7 +1364,11 @@ def sync_index(project: str) -> str:
             stats = _SYNC_PIPELINE.index_project(
                 proj, store, searcher.embedder, only_changed=True
             )
+        from .aftersync import after_sync
+
+        follow_up = after_sync(cfg, project, stats.changed_paths, memory_store)
         return {
+            **follow_up,
             "project": project,
             "files_seen": stats.files_seen,
             "reindexed": stats.files_indexed,
@@ -903,26 +1402,7 @@ def sync_index(project: str) -> str:
             job["thread"] = thread
             _SYNC_JOBS[project] = job
             thread.start()
-
-    # Wait briefly: the common case (a warm project with few changes) finishes
-    # in well under a second, and answering with the real counts is much more
-    # useful than telling the caller to check back.
-    thread = job["thread"]
-    if thread.is_alive():
-        thread.join(timeout=_SYNC_GRACE_SECONDS)
-    if thread.is_alive():
-        return _dump({
-            "project": project,
-            "status": "running",
-            "elapsed_seconds": round(time.time() - job["started"], 1),
-            "note": "Still indexing in the background rather than timing out "
-                    "this request. Call sync_index again for the final counts; "
-                    "searches already work against whatever has been written "
-                    "so far.",
-        })
-    # Finished (just now, or earlier and uncollected) -- hand back the result.
-    with _SYNC_LOCK:
-        return _dump(_sync_finish(project, job))
+    return job
 
 
 def main() -> None:

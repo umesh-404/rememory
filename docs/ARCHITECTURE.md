@@ -149,17 +149,99 @@ and residual risks: SECURITY.md.
 ## Session continuity
 
 `session` is a memory type with a one-active-per-project rule: `save_session`
-(summary, next steps, files to read first) supersedes the previous handoff,
-and `get_briefing` puts the active one at the top as "Where you left off".
-The files list is the point: the next session opens three files instead of
-re-exploring the repo. Handoffs skip the near-duplicate guard (consecutive
-handoffs legitimately resemble each other).
+(summary, next steps, files to read first) supersedes the previous handoff.
+
+**The briefing is an index, not an archive** (`memory_mcp/briefing.py`). It is
+built to a hard character budget (default 5,000; it used to inline every
+decision in full and reached ~121k characters on a long-lived project, so
+the tool meant to start a session was the one agents avoided). Sections get a
+fixed share of the budget in priority order: the handoff (summary, open tasks,
+files to read first), what changed since that handoff (decisions added,
+memories retired), trust warnings (index behind the last commit, suspect /
+probably-replaced memories, other agents' file claims), the migration head and
+next decision number, the ten newest decisions as excerpts sized to fit, then
+titles of verified recipes. Detail stays behind `get_memory` / search.
+
+**Delivered without being asked.** `scripts/agent_hook.py` is one hook entry
+point for every agentic IDE/CLI with lifecycle hooks; it accepts each client's
+stdin field names and prints each client's output shape
+(`hookSpecificOutput.additionalContext` for Claude Code, Codex, VS Code
+Copilot and Gemini CLI; `additional_context` for Cursor; plain stdout for
+Kiro). Claude Code and Codex also fire it after **context compaction** -- the
+moment an agent loses its working picture mid-session. Injected text is phrased
+as facts, never instructions, so prompt-injection defences do not trip.
+
+## Memory staleness
+
+A stale memory is worse than none: it reads as authoritative. Four mechanisms,
+none of which ever deletes anything:
+
+- **Dependencies.** `store_memory(depends_on=[path | path::Symbol])` records a
+  content hash per dependency (a symbol hashes only its own lines, so edits
+  elsewhere in the file do not raise alarms). After every sync,
+  `memory_mcp/aftersync.py` re-hashes the dependencies of memories touching
+  changed paths and marks drifted ones `suspect`; search labels them SUSPECT,
+  briefings list them. `confirm_memory` re-baselines; `update_memory` /
+  `retire_memory` resolve.
+- **Supersession by reference.** "supersedes D-123" (any `ID-123` form) in a
+  new memory retires the active memory whose title carries that id.
+- **Related-on-write.** `store_memory` returns active memories in the
+  0.62-0.85 similarity band -- the same subject but not a duplicate, exactly
+  where a new fact silently contradicts an old one -- so the writer fixes them
+  in the same step. `review_memories` runs the same comparison across the
+  project (an older memory with a newer near-neighbour), plus missing files
+  named in the content and passed recheck dates.
+- **Evidence and expiry.** `evidence` (tested / read-at-source / reported /
+  inferred) and `verified_at` travel with every result. `vendor` memories
+  require a source URL and expire after 30 days (`recheck_after`); search
+  labels them EXPIRED until re-confirmed.
+
+## Index freshness
+
+- Git hooks (`post-commit`, `post-merge`, `post-checkout`, `post-rewrite`) and
+  agent post-edit hooks run `scripts/scheduled.py sync <project>`: each event
+  only marks the project dirty; one worker per project syncs until clean
+  (debounced 4 s, waits politely on the global index lock). A rebase of
+  twenty commits costs one or two syncs.
+- Searches verify the files they return (mtime first, hash only on mismatch);
+  any drift triggers a project sync and a re-run of the search before the
+  answer goes back. Agents no longer need to remember `sync_index`.
+- Discovery keeps a stat cache (`data/statcache/`): unchanged files cost one
+  `stat()`, not a read and a SHA-256 -- the same trade-off git's index makes.
+
+## Repo facts, test map, symbols, claims
+
+- `memory_mcp/facts.py` + `memory_mcp/detect.py`: facts computed from the
+  working tree at call time (never stored, so they cannot rot) -- migration
+  heads across the common ORMs, CI and local gates, toolchain and commands,
+  ID sequences (ADR folders, inline decision ids). Optional per-project
+  `facts:` config adds sequences, Python constants and cross-file set checks
+  (e.g. every alarm code needs a severity row and an index row).
+- `memory_mcp/testmap.py`: snapshots a coverage.py data file recorded with
+  per-test contexts (`--cov-context=test` or `dynamic_context`) whenever it is
+  newer than the last snapshot; `tests_for` answers by numbits/arc lookup,
+  else a labelled heuristic. A generated rcfile adds contexts to a project's
+  own coverage settings without changing any count.
+- `memory_mcp/symbols.py`: definitions located through the index, re-anchored
+  in the live file; callers from `git grep`, attributed to their enclosing
+  function.
+- `memory_mcp/localdb.py`: SQLite (WAL, `BEGIN IMMEDIATE`) for file claims and
+  ID reservations -- atomic across the separate server processes that parallel
+  agents run.
+
+## Resource use
+
+- int8 scalar quantization on the derived `code`/`docs` vectors (originals on
+  disk, rescored with 2x oversampling; measured 99.5% top-10 overlap and an
+  identical top hit on 100% of test queries). `memory` stays exact.
+- Ollama `keep_alive`: 15 min embedder, 10 min reranker.
+- The stale-memory review is cached per project, invalidated on any write.
 
 ## Concurrency and the MCP surface
 
 - **Single-writer lock** (`indexer/lockfile.py`): every indexing path -- CLI,
   scheduled sync, and the MCP `sync_index` tool -- goes through one atomic
-  O_EXCL lockfile (stale after 30 min). Busy callers get a clear message
+  O_EXCL lockfile (heartbeat-refreshed; stale after 5 min). Busy callers get a clear message
   instead of racing delete-then-write on the same points.
 - **MCP hygiene**: all tools carry spec annotations (`readOnlyHint` on reads,
   `destructiveHint` only on `delete_memory`, `openWorldHint: false`

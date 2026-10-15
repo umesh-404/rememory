@@ -25,8 +25,10 @@ provider:
   # the first Claude search after a pause pay a multi-second reload. We ask for
   # a longer hold *per request* rather than via the global OLLAMA_KEEP_ALIVE
   # env var, because the global setting would also pin the 9B/14B chat models
-  # and exhaust the 8 GB of VRAM.
-  keep_alive: 30m
+  # and exhaust the 8 GB of VRAM. 15m (not 30m): long enough to span the
+  # bursts a working session produces, short enough that ~1.5 GB of VRAM is
+  # handed back soon after you stop -- the model reloads in ~1-2 s.
+  keep_alive: 15m
   request_timeout_seconds: 300
 
 model:
@@ -72,7 +74,9 @@ reranker:
   candidates: 10
   # Parallel scoring requests to Ollama.
   concurrency: 4
-  keep_alive: 30m
+  # Searches only (never syncs), and the larger model (~2.5 GB VRAM): release
+  # it sooner than the embedder.
+  keep_alive: 10m
   timeout_seconds: 60
   # Per-call latency guard: if reranking a result set would exceed this, the
   # search silently falls back to RRF order rather than making Claude wait.

@@ -36,6 +36,15 @@ from indexer.sparse import build_sparse_vector
 # surface after fusion.
 PREFETCH_MULTIPLIER = 4
 
+# Code/docs vectors are int8-quantized (config/collections.yaml). The HNSW
+# walk uses the small copy; the top candidates are rescored against the
+# full-precision originals, over-fetching 2x so a quantization near-miss is
+# still caught. Measured: identical top hit on 100% of test queries. On a
+# collection without quantization (memory) Qdrant simply ignores this.
+QUANT_PARAMS = models.SearchParams(
+    quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0)
+)
+
 
 @dataclass
 class SearchResult:
@@ -119,6 +128,7 @@ class Searcher:
                 using="dense",
                 filter=query_filter,
                 limit=limit * PREFETCH_MULTIPLIER,
+                params=QUANT_PARAMS,
             )
         ]
         if indices:
@@ -155,6 +165,7 @@ class Searcher:
                 query_filter=query_filter,
                 limit=fetch,
                 with_payload=True,
+                search_params=QUANT_PARAMS,
             ).points
 
         results = [self._to_result(p) for p in points]
@@ -203,6 +214,56 @@ class Searcher:
                 self._expand(collection, r)
 
         return results
+
+    @staticmethod
+    def mark_freshness(results: list[SearchResult], root) -> int:
+        """Flag code/docs hits whose file changed on disk since it was indexed.
+
+        The index lags the working tree between syncs, and several agents
+        editing at once make that window common. Hashing just the handful of
+        files a search returned is cheap (they are already in the OS cache
+        more often than not) and turns "silently outdated" into "flagged".
+        Returns how many results are stale. Always strips content_hash, which
+        is bookkeeping, not something the caller should see.
+        """
+        import hashlib
+        from pathlib import Path
+
+        checked: dict[str, str | None] = {}
+        stale = 0
+        from datetime import datetime
+
+        for r in results:
+            indexed = r.extra.pop("content_hash", None)
+            indexed_mtime = r.extra.pop("last_modified", None)
+            if root is None or not indexed:
+                continue
+            if r.source_path not in checked:
+                path = Path(root) / r.source_path
+                try:
+                    st = path.stat()
+                    # Same mtime as when indexed: unchanged, no read needed.
+                    # (A rewrite that preserves mtime is caught by the next sync.)
+                    same = False
+                    if indexed_mtime:
+                        try:
+                            same = abs(datetime.fromisoformat(indexed_mtime).timestamp()
+                                       - st.st_mtime) < 0.001
+                        except (TypeError, ValueError):
+                            same = False
+                    checked[r.source_path] = (indexed if same else
+                                              hashlib.sha256(path.read_bytes()).hexdigest())
+                except FileNotFoundError:
+                    checked[r.source_path] = "deleted"
+                except OSError:
+                    checked[r.source_path] = None
+            current = checked[r.source_path]
+            if current is None or current == indexed:
+                continue
+            stale += 1
+            r.extra["stale"] = ("file deleted since indexing" if current == "deleted"
+                                else "file edited since indexing -- read the real lines")
+        return stale
 
     def _recency_bias(self, results: list[SearchResult]) -> list[SearchResult]:
         import math
@@ -276,7 +337,7 @@ class Searcher:
         extra: dict[str, Any] = {}
         for key in ("title", "language", "symbol_type", "doc_type", "memory_type", "tags",
                     "status", "created_at", "updated_at", "git_commit",
-                    "chunk_index", "chunk_total"):
+                    "chunk_index", "chunk_total", "content_hash", "last_modified"):
             if p.get(key) is not None:
                 extra[key] = p[key]
         return SearchResult(

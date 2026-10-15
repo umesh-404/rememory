@@ -35,6 +35,17 @@ import yaml
 from qdrant_client import QdrantClient, models
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
+
+def _quantization(spec: dict, defaults: dict):
+    """int8 scalar quantization from config; a collection opts out with
+    `quantization: null`."""
+    q = spec["quantization"] if "quantization" in spec else defaults.get("quantization")
+    if not q:
+        return None
+    return models.ScalarQuantization(scalar=models.ScalarQuantizationConfig(
+        type=models.ScalarType.INT8, quantile=q.get("quantile", 0.99),
+        always_ram=q.get("always_ram", True)))
+
 def _qdrant_url() -> str:
     """Read the chosen port directly.
 
@@ -137,6 +148,24 @@ def ensure_collection(client: QdrantClient, name: str, spec: dict, defaults: dic
                 f"config, or re-create the collection (and re-index)."
             )
         print(f"  [ok]      '{name}' exists ({info.points_count} points, dim {actual.size})")
+        # Bring an existing collection up to the configured storage layout
+        # (non-destructive: Qdrant re-optimizes in the background, points and
+        # payloads are untouched). Skipped when it already matches.
+        want_q = _quantization(spec, defaults)
+        want_disk = spec.get("on_disk_vectors", dense.get("on_disk", False))
+        have_q = info.config.quantization_config
+        have_disk = bool(getattr(actual, "on_disk", False))
+        # Never REMOVES quantization on its own (want None, have some) --
+        # that direction only happens by hand.
+        drift = (want_q is None) != (have_q is None) or want_disk != have_disk
+        if drift and (want_q is not None or have_q is None):
+            client.update_collection(
+                collection_name=name,
+                vectors_config={"dense": models.VectorParamsDiff(on_disk=want_disk)},
+                quantization_config=want_q,
+            )
+            print(f"  [tuned]   '{name}' storage: on_disk={want_disk}, "
+                  f"quantization={'int8' if want_q else 'off'}")
     else:
         client.create_collection(
             collection_name=name,
@@ -144,7 +173,7 @@ def ensure_collection(client: QdrantClient, name: str, spec: dict, defaults: dic
                 "dense": models.VectorParams(
                     size=dense["size"],
                     distance=models.Distance(dense["distance"]),
-                    on_disk=dense.get("on_disk", False),
+                    on_disk=spec.get("on_disk_vectors", dense.get("on_disk", False)),
                 )
             },
             sparse_vectors_config={
@@ -156,6 +185,7 @@ def ensure_collection(client: QdrantClient, name: str, spec: dict, defaults: dic
             hnsw_config=models.HnswConfigDiff(**defaults["hnsw_config"]),
             optimizers_config=models.OptimizersConfigDiff(**defaults["optimizers_config"]),
             on_disk_payload=defaults["on_disk_payload"],
+            quantization_config=_quantization(spec, defaults),
         )
         print(f"  [CREATED] '{name}'")
 

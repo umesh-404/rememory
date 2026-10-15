@@ -215,8 +215,12 @@ ok "automation configured"
 
 step "Verifying the installation (test suite)"
 uv run tests/test_unit.py || fail "unit tests failed."
+uv run tests/test_features.py || fail "feature tests failed."
 uv run tests/test_roundtrip.py || fail "end-to-end round trip failed."
 ok "all verification tests passed"
+
+step "Installing automation hooks (git + agent IDEs)"
+uv run scripts/install_hooks.py || info "hook install reported a problem -- re-run scripts/install_hooks.py later"
 
 printf '\n\033[32mSetup complete.\033[0m\n'
 uv run scripts/connect.py

@@ -85,6 +85,9 @@ class Project:
     description: str = ""
     extra_ignore_dirs: tuple[str, ...] = ()
     include_only: tuple[str, ...] = ()
+    # Optional `facts:` block -- extractors for repo facts agents otherwise
+    # guess (id sequences, constants, cross-file checks). See memory_mcp/facts.py.
+    facts: dict = field(default_factory=dict, hash=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -205,6 +208,7 @@ def load_config() -> Config:
             description=(spec.get("description") or "").strip(),
             extra_ignore_dirs=tuple(spec.get("extra_ignore_dirs") or ()),
             include_only=tuple(spec.get("include_only") or ()),
+            facts=dict(spec.get("facts") or {}),
         )
 
     return Config(

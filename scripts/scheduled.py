@@ -143,14 +143,149 @@ def run_job(name: str, args: list[str], keep: str) -> int:
     return 1
 
 
+# ------------------------------------------------------- per-project sync
+# Git hooks and agent post-edit hooks fire in bursts (a rebase rewrites 20
+# commits; an agent saves 30 files in a minute). Running one sync per event
+# would embed the same files over and over. Instead every event just marks
+# the project DIRTY; one worker per project syncs until nothing is dirty.
+# Twenty events therefore cost one or two syncs, not twenty.
+DEBOUNCE_SECONDS = 4.0      # let a burst settle before the first pass
+BUSY_RETRY_SECONDS = 10.0   # another indexer holds the global lock
+BUSY_RETRY_MAX = 60         # ~10 minutes, then give up (scheduled sync covers it)
+WORKER_STALE_SECONDS = 300.0  # the worker heartbeats every few seconds while alive
+HEARTBEAT_SECONDS = 15.0
+
+
+def _flag(project: str, kind: str) -> Path:
+    safe = "".join(c for c in project if c.isalnum() or c in "-_")
+    return ROOT / "data" / f".sync-{kind}-{safe}"
+
+
+def _take_worker(lock: Path) -> bool:
+    import os
+    import time
+
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime < WORKER_STALE_SECONDS:
+                    return False
+                lock.unlink()  # a crashed worker (no heartbeat for 5 min); take over
+            except OSError:
+                return False
+    return False
+
+
+def sync_project(project: str) -> int:
+    """Mark dirty; if no worker is running, become it and sync until clean.
+
+    No event can be lost: the worker re-checks the dirty flag AFTER releasing
+    its lock and takes the lock again if a late event slipped in between its
+    last check and the release. Any pass that could not run (services down,
+    pass cap hit) leaves the flag set for the next event or worker.
+    """
+    import time
+
+    dirty = _flag(project, "dirty")
+    lock = _flag(project, "worker")
+    dirty.parent.mkdir(parents=True, exist_ok=True)
+    dirty.touch()
+    rc = 0
+    while True:
+        if not _take_worker(lock):
+            return rc  # a live worker exists and will see the dirty flag
+        try:
+            time.sleep(DEBOUNCE_SECONDS)
+            passes = 0
+            while dirty.exists():
+                if passes >= 10:
+                    log("sync", f"{project}: still dirty after {passes} passes; leaving "
+                                f"it for the next event or the scheduled sync")
+                    return rc  # dirty stays set
+                dirty.unlink(missing_ok=True)
+                passes += 1
+                for _ in range(BUSY_RETRY_MAX):
+                    rc, busy, ran = _run_project_index(project, lock)
+                    if not ran:
+                        dirty.touch()  # nothing was indexed; keep the work pending
+                        return rc
+                    if not busy:
+                        break
+                    time.sleep(BUSY_RETRY_SECONDS)
+                    lock.touch()
+                else:
+                    dirty.touch()
+                    log("sync", f"{project}: gave up waiting for the index lock")
+                    return 1
+        finally:
+            lock.unlink(missing_ok=True)
+        if not dirty.exists():
+            return rc
+        # An event landed between our last check and releasing the lock: loop.
+
+
+def _run_project_index(project: str, lock: Path) -> tuple[int, bool, bool]:
+    """Returns (returncode, busy, ran). Heartbeats the worker lock while the
+    index runs, so a long first index is never mistaken for a dead worker."""
+    import time
+
+    qdrant, ollama = _ports()
+    if not (_reachable(f"http://127.0.0.1:{qdrant}/readyz")
+            and _reachable(f"http://127.0.0.1:{ollama}/api/tags")):
+        log("sync", f"{project}: skipped, services not reachable")
+        return 0, False, False
+    try:
+        proc = subprocess.Popen(
+            [_python(), "-m", "indexer.cli", "index", "--project", project, "--changed"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", cwd=str(ROOT), **NO_WINDOW,
+        )
+    except OSError as exc:
+        log("sync", f"{project}: FAILED to launch: {exc}")
+        return 1, False, False
+    import threading
+
+    chunks: list[str] = []
+    reader = threading.Thread(target=lambda: chunks.append(proc.stdout.read() or ""),
+                              daemon=True)
+    reader.start()
+    deadline = time.time() + 3600
+    while True:
+        lock.touch()  # heartbeat: this worker is alive
+        try:
+            proc.wait(timeout=HEARTBEAT_SECONDS)
+            break
+        except subprocess.TimeoutExpired:
+            if time.time() > deadline:
+                proc.kill()
+                proc.wait()
+                log("sync", f"{project}: killed after 1 h")
+                break
+    reader.join(timeout=10)
+    out = "".join(chunks)
+    if "already running" in out:
+        return 0, True, True
+    summary = " | ".join(ln.strip() for ln in out.splitlines() if "chunks" in ln)[:400]
+    log("sync", f"{project}: {'ok' if proc.returncode == 0 else 'FAILED'}: "
+                f"{summary or out.strip()[-200:]}")
+    return proc.returncode or 0, False, True
+
+
 def main() -> int:
     hide_own_console()  # before anything slow, so no black window lingers
     job = sys.argv[1] if len(sys.argv) > 1 else ""
+    if job == "sync" and len(sys.argv) > 2:
+        return sync_project(sys.argv[2])
     if job == "sync":
         return run_job("sync", ["-m", "indexer.cli", "sync"], keep="chunks")
     if job == "backup":
         return run_job("backup", ["scripts/export_memory.py"], keep="exported")
-    sys.stderr.write("usage: scheduled.py sync|backup\n")
+    sys.stderr.write("usage: scheduled.py sync [project]|backup\n")
     return 2
 
 
