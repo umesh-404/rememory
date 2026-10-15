@@ -292,6 +292,11 @@ class MemoryStore:
             )
         overrides = {k: v for k, v in fields.items() if v is not None}
         content_changed = content is not None and content != p.get("content")
+        if not content_changed and not overrides:
+            # Only the title and/or tags change: the knowledge itself is the
+            # same, so keep the id -- briefings, handoffs and other memories
+            # refer to it. (A content change still makes a new version.)
+            return self._relabel(memory_id, p, title, tags)
         # "tested" describes the OLD text; a rewrite has not been tested.
         carried_evidence = p.get("evidence")
         if content_changed and carried_evidence == "tested":
@@ -329,6 +334,44 @@ class MemoryStore:
             wait=True,
         )
         return replacement
+
+    def _relabel(self, memory_id: str, p: dict, title: str | None,
+                 tags: list[str] | None) -> StoredMemory:
+        now = datetime.now(UTC).isoformat()
+        payload = dict(p)
+        if tags is not None:
+            payload["tags"] = sorted(set(tags))
+        if title is not None and title != p.get("title"):
+            if not title.strip():
+                raise MemoryError("A memory needs a title.")
+            payload["title"] = title
+            payload["previous_titles"] = [*(p.get("previous_titles") or []), p.get("title")]
+        if payload == p:
+            raise MemoryError("Nothing to change: give a new title, content, tags or "
+                              "another field.")
+        payload["updated_at"] = now
+        if payload.get("title") != p.get("title"):
+            # The title is part of the embedded text: re-embed under the same id.
+            embed_text = f"{payload['title']}\n\n{payload.get('content') or ''}"
+            if payload.get("error_signature"):
+                embed_text = (f"{payload['title']}\n\nERROR: {payload['error_signature']}"
+                              f"\n\n{payload.get('content') or ''}")
+            vectors: dict[str, Any] = {"dense": self.embedder.embed_documents([embed_text])[0]}
+            indices, values = build_sparse_vector(embed_text, self.cfg.sparse)
+            if indices:
+                vectors["lexical"] = models.SparseVector(indices=indices, values=values)
+            self.client.upsert(
+                collection_name=COLLECTION,
+                points=[models.PointStruct(id=memory_id, vector=vectors, payload=payload)],
+                wait=True)
+        else:
+            self.client.set_payload(collection_name=COLLECTION,
+                                    payload={"tags": payload["tags"], "updated_at": now},
+                                    points=[memory_id], wait=True)
+        self._invalidate()
+        return StoredMemory(memory_id, payload["title"], payload["memory_type"],
+                            payload["project"], payload.get("status", "active"),
+                            payload.get("created_at", now))
 
     # ----------------------------------------------------------------- delete
     def delete(self, memory_id: str) -> dict[str, str]:

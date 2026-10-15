@@ -191,6 +191,18 @@ async def main() -> int:
             stale = await call("update_memory", memory_id=mem_id, title="should fail")
             check("updating a superseded memory rejected", stale.startswith("REJECTED"), stale[:80])
 
+            renamed = json.loads(await call("update_memory", memory_id=new_id[:8],
+                                            title="MCP test: reranker fallback (renamed)",
+                                            tags=["mcp-test", "renamed"]))
+            check("title/tag-only update keeps the id (short id accepted)",
+                  renamed.get("updated_in_place") == new_id, str(renamed)[:120])
+            after = json.loads(await call("get_memory", memory_id=new_id))
+            check("rename stored, old title kept in previous_titles",
+                  after.get("title", "").endswith("(renamed)") and after.get("previous_titles")
+                  and after.get("status") == "active", str(after)[:160])
+            check("renamed memory still found by search", new_id in await call(
+                "search_memory", query="reranker fallback renamed", project=write_project))
+
             # ---- staleness: dependency + retire + confirm (self-cleaning) ----
             dep_file = None
             if root:

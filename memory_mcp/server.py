@@ -526,6 +526,8 @@ def update_memory(
 
     The old version is kept and marked superseded (history is preserved, like
     an ADR trail); a new active version is created and its NEW id returned.
+    Changing ONLY the title and/or tags keeps the same id (the knowledge did
+    not change; references to the id stay valid).
     Provide only the fields that change. If you only have a vague recollection
     of the memory, find its exact id via list_memories or search_memory first.
     """
@@ -536,6 +538,9 @@ def update_memory(
                                 error_signature=error_signature)
     except MemoryError as exc:
         return f"REJECTED: {exc}"
+    if m.id == memory_store.resolve_id(memory_id):
+        return _dump({"updated_in_place": m.id, "title": m.title,
+                      "note": "Only the title/tags changed, so the id is unchanged."})
     return _dump({"superseded": memory_id, "new_id": m.id, "title": m.title})
 
 
