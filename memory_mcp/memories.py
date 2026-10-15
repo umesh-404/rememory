@@ -72,8 +72,10 @@ _PART_RE = re.compile(
     r"|\(\s*\d+\s*/\s*\d+\s*\)|\b\d+\s+of\s+\d+\b", re.I)
 
 
-_GONE_RE = re.compile(r"\b(?:delet\w*|remov\w*|retir\w*|dropp\w*|prun\w*|gone|"
-                      r"no longer exists?|renamed|moved)\b", re.I)
+# Past tense / state only: "safe to delete" or "remove X later" says nothing
+# about whether the file is gone.
+_GONE_RE = re.compile(r"\b(?:deleted|deletion|removed|removal|retired|dropped|pruned|"
+                      r"gone|no longer exists?|renamed|moved)\b", re.I)
 
 
 def _said_gone(text: str, ref: str) -> bool:
@@ -84,6 +86,69 @@ def _said_gone(text: str, ref: str) -> bool:
             return True
         start = k + len(ref)
     return False
+
+
+# Repo-relative paths with an extension, e.g. apps/api/src/main.py.
+# Multi-dot names (dashboard.test.tsx) are captured whole; a sentence-ending
+# full stop after the path is allowed.
+_PATH_RE = re.compile(
+    r"(?<![\w/.:-])((?:[\w.-]+/)+[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{1,5})(?![\w/]|\.\w)")
+
+
+def _missing_refs(root, payload: dict, tracked) -> list[str]:
+    """Repo paths a memory's content names that do not exist (any more)."""
+    text = payload.get("content") or ""
+    if _GONE_RE.search(payload.get("title") or ""):
+        return []  # a memory RECORDING a deletion is accurate, not stale
+    return [
+        ref for ref in dict.fromkeys(_PATH_RE.findall(text))
+        if _inside(root, ref) and (root / ref.split("/")[0]).is_dir()
+        and not (root / ref).exists() and not _tracked_suffix(tracked, ref)
+        and not _said_gone(text, ref)
+    ]
+
+
+def _path_history(root, refs: list[str]) -> dict[str, tuple]:
+    """{path: (deleted_at, renamed_to)} from git, for paths gone from the tree.
+    A rename only shows when the whole commit is inspected (a path-limited
+    log reports the old side as a plain deletion)."""
+    import subprocess
+    import sys
+
+    if not refs or root is None:
+        return {}
+    quiet = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+
+    def git(*args: str) -> str:
+        try:
+            r = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                               timeout=20, check=False, stdin=subprocess.DEVNULL, **quiet)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
+
+    out: dict[str, tuple] = {}
+    commits: dict[str, datetime] = {}
+    current = None
+    for line in git("log", "--diff-filter=D", "--name-status", "--format=@@%H %cI",
+                    "--", *refs[:200]).splitlines():
+        if line.startswith("@@"):
+            sha, _, when = line[2:].partition(" ")
+            try:
+                current = (sha, datetime.fromisoformat(when).astimezone(UTC))
+            except ValueError:
+                current = None
+        elif current and line.startswith("D\t"):
+            path = line[2:].strip()
+            if path in refs and path not in out:  # newest deletion wins
+                out[path] = (current[1], None)
+                commits[current[0]] = current[1]
+    for sha in list(commits)[:20]:
+        for line in git("show", "-M", "--name-status", "--format=", sha).splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3 and parts[0].startswith("R") and parts[1] in out:
+                out[parts[1]] = (out[parts[1]][0], parts[2])
+    return out
 
 
 def _tracked_files(root) -> frozenset[str] | None:
@@ -335,6 +400,21 @@ class MemoryStore:
         )
         return replacement
 
+    def _reembed(self, memory_id: str, payload: dict) -> None:
+        """Replace a point's vectors and payload under the SAME id."""
+        embed_text = f"{payload['title']}\n\n{payload.get('content') or ''}"
+        if payload.get("error_signature"):
+            embed_text = (f"{payload['title']}\n\nERROR: {payload['error_signature']}"
+                          f"\n\n{payload.get('content') or ''}")
+        vectors: dict[str, Any] = {"dense": self.embedder.embed_documents([embed_text])[0]}
+        indices, values = build_sparse_vector(embed_text, self.cfg.sparse)
+        if indices:
+            vectors["lexical"] = models.SparseVector(indices=indices, values=values)
+        self.client.upsert(
+            collection_name=COLLECTION,
+            points=[models.PointStruct(id=memory_id, vector=vectors, payload=payload)],
+            wait=True)
+
     def _relabel(self, memory_id: str, p: dict, title: str | None,
                  tags: list[str] | None) -> StoredMemory:
         now = datetime.now(UTC).isoformat()
@@ -352,18 +432,7 @@ class MemoryStore:
         payload["updated_at"] = now
         if payload.get("title") != p.get("title"):
             # The title is part of the embedded text: re-embed under the same id.
-            embed_text = f"{payload['title']}\n\n{payload.get('content') or ''}"
-            if payload.get("error_signature"):
-                embed_text = (f"{payload['title']}\n\nERROR: {payload['error_signature']}"
-                              f"\n\n{payload.get('content') or ''}")
-            vectors: dict[str, Any] = {"dense": self.embedder.embed_documents([embed_text])[0]}
-            indices, values = build_sparse_vector(embed_text, self.cfg.sparse)
-            if indices:
-                vectors["lexical"] = models.SparseVector(indices=indices, values=values)
-            self.client.upsert(
-                collection_name=COLLECTION,
-                points=[models.PointStruct(id=memory_id, vector=vectors, payload=payload)],
-                wait=True)
+            self._reembed(memory_id, payload)
         else:
             self.client.set_payload(collection_name=COLLECTION,
                                     payload={"tags": payload["tags"], "updated_at": now},
@@ -433,10 +502,70 @@ class MemoryStore:
             payload["depends_on"] = [dict(d, hash=dependency_hash(root, d)) for d in deps]
         if old.payload.get("memory_type") == "vendor":
             payload["recheck_after"] = _days_from_now(VENDOR_RECHECK_DAYS)
+        elif (old.payload.get("recheck_after")
+              and str(old.payload["recheck_after"])[:10] < now[:10]):
+            payload["recheck_after"] = None  # checked now; the passed date is spent
+        root = self._root(old.payload.get("project"))
+        accepted: list[str] = []
+        if root is not None and root.exists():
+            accepted = _missing_refs(root, old.payload, _tracked_files(root))
+        payload["confirmed_missing"] = accepted or None
         self.client.set_payload(collection_name=COLLECTION, payload=payload,
                                 points=[memory_id], wait=True)
         self._invalidate()
-        return {"confirmed": memory_id, "title": old.payload.get("title"), "verified_at": now}
+        out = {"confirmed": memory_id, "title": old.payload.get("title"), "verified_at": now}
+        if accepted:
+            out["accepted_missing_files"] = accepted
+        return out
+
+    # -------------------------------------------------------------- fix paths
+    def fix_paths(self, memory_id: str, mapping: dict[str, str]) -> dict:
+        """Rewrite file references (content + depends_on) IN PLACE -- a renamed
+        file does not change what the memory knows, so no new version and the
+        id stays the same."""
+        memory_id = self.resolve_id(memory_id)
+        old = self._get(memory_id)
+        p = dict(old.payload or {})
+        if p.get("status") != "active":
+            raise MemoryError(f"Memory {memory_id} is not active.")
+        if not mapping:
+            raise MemoryError("fix_paths needs at least one {old_path: new_path} pair.")
+        root = self._root(p.get("project"))
+        content = p.get("content") or ""
+        deps = [dict(d) for d in p.get("depends_on") or []]
+        applied = {}
+        for old_path, new_path in mapping.items():
+            old_path = (old_path or "").replace("\\", "/").strip()
+            new_path = (new_path or "").replace("\\", "/").strip()
+            if not old_path or not new_path:
+                raise MemoryError("fix_paths keys and values must be non-empty paths.")
+            if root is not None and (not _inside(root, new_path)
+                                     or not (root / new_path).exists()):
+                raise MemoryError(f"{new_path!r} does not exist in the project; fix_paths "
+                                  f"only points references at files that exist.")
+            hits = content.count(old_path)
+            content = content.replace(old_path, new_path)
+            for d in deps:
+                if d.get("path") == old_path:
+                    d["path"] = new_path
+                    d["ref"] = new_path + (f"::{d['symbol']}" if d.get("symbol") else "")
+                    d["hash"] = dependency_hash(root, d)
+                    hits += 1
+            if not hits:
+                raise MemoryError(f"{old_path!r} is not mentioned in memory {memory_id}.")
+            applied[old_path] = new_path
+        now = datetime.now(UTC).isoformat()
+        p["content"] = content
+        if deps:
+            p["depends_on"] = deps
+            p["depends_paths"] = sorted({d["path"] for d in deps})
+            if root is not None and not drift_reason(root, deps):
+                p["suspect"] = None
+        p["path_fixes"] = [*(p.get("path_fixes") or []), {"at": now, "map": applied}]
+        p["updated_at"] = now
+        self._reembed(memory_id, p)
+        self._invalidate()
+        return {"fixed_in_place": memory_id, "title": p.get("title"), "paths": applied}
 
     # -------------------------------------------------------------- dependents
     def flag_dependents(self, project: str, changed_paths: list[str]) -> list[dict]:
@@ -511,7 +640,6 @@ class MemoryStore:
         A memory confirmed (confirm_memory) after the newer one was written is
         not re-flagged for that pair.
         """
-        import re
         from pathlib import Path
 
         import numpy as np
@@ -604,11 +732,8 @@ class MemoryStore:
                 f"({(pj.get('created_at') or '')[:10]}) {why} -- check whether this is "
                 f"still true")
 
-        # Repo-relative paths with an extension, e.g. apps/api/src/main.py.
-        # Multi-dot names (dashboard.test.tsx) are captured whole.
-        path_re = re.compile(
-            r"(?<![\w/.:-])((?:[\w.-]+/)+[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{1,5})(?![\w/.])")
         root_path = Path(root) if root else None
+        missing_by_row: dict[int, list[str]] = {}
         tracked = _tracked_files(root_path) if root_path is not None else None
         today = now.date().isoformat()
         for i, p in enumerate(rows):
@@ -624,22 +749,38 @@ class MemoryStore:
                     f"recheck date {str(pl['recheck_after'])[:10]} has passed -- re-read "
                     f"{pl.get('source_url') or 'the source'} and confirm_memory or update it")
             if root_path is not None and root_path.exists():
-                text = pl.get("content") or ""
-                gone_record = _GONE_RE.search(pl.get("title") or "")
-                missing = [
-                    ref for ref in dict.fromkeys(path_re.findall(text))
-                    if _inside(root_path, ref) and (root_path / ref.split("/")[0]).is_dir()
-                    and not (root_path / ref).exists() and not _tracked_suffix(tracked, ref)
-                    # A memory RECORDING the deletion is accurate, not stale.
-                    and not gone_record and not _said_gone(text, ref)
-                ]
+                # Files already missing when someone confirmed the memory were
+                # judged then; only a file that went missing SINCE re-flags it.
+                accepted = set(pl.get("confirmed_missing") or [])
+                missing = [r for r in _missing_refs(root_path, pl, tracked)
+                           if r not in accepted]
                 if missing:
-                    flags.setdefault(i, []).append(
-                        "mentions files that no longer exist: " + ", ".join(missing[:4]))
+                    missing_by_row[i] = missing
             age = (now - created[i]).days
             if (pl.get("memory_type") in self.PERISHABLE_TYPES and age > self.PERISHABLE_DAYS
                     and not verified[i]):
                 flags.setdefault(i, []).append(f"{pl.get('memory_type')} note is {age} days old")
+
+        if missing_by_row:
+            history = _path_history(root_path, sorted({r for v in missing_by_row.values()
+                                                       for r in v}))
+            for i, refs in missing_by_row.items():
+                notes = []
+                for ref in refs:
+                    deleted_at, renamed_to = history.get(ref, (None, None))
+                    if deleted_at and deleted_at <= created[i]:
+                        continue  # already gone when written: it records history
+                    if renamed_to:
+                        notes.append(f"{ref} (renamed to {renamed_to}; "
+                                     f"update_memory fix_paths can correct it in place)")
+                    elif deleted_at:
+                        notes.append(f"{ref} (deleted {deleted_at.date().isoformat()})")
+                    else:
+                        notes.append(ref)
+                if notes:
+                    flags.setdefault(i, []).append(
+                        "mentions files that no longer exist: " + ", ".join(notes[:4])
+                        + " -- if the memory still holds, confirm_memory accepts these")
 
         out = []
         for i, reasons in flags.items():

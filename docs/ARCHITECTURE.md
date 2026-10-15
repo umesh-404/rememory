@@ -196,7 +196,12 @@ none of which ever deletes anything:
   newer memory restates it almost verbatim (similarity >= 0.92, numbered
   series excepted), changed dependencies, passed recheck dates, and repo files
   it names that are gone (checked against `git ls-files`, so paths relative to
-  a sub-app count, and text recording the deletion is not flagged).
+  a sub-app count, and text recording the deletion is not flagged). git
+  history says whether each missing file was deleted (with the date) or
+  renamed (with the new path); a memory written after the deletion is
+  recording history and is not flagged. `confirm_memory` accepts the files
+  missing at that moment, so only a file that goes missing later re-flags it,
+  and `update_memory(fix_paths={old: new})` repoints references in place.
 - **Short ids.** Every tool taking a memory id accepts the 8-character form
   that briefings and reviews print (any unique prefix of 6+ characters).
 - **Evidence and expiry.** `evidence` (tested / read-at-source / reported /

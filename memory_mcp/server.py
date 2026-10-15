@@ -521,6 +521,7 @@ def update_memory(
     source_url: str | None = None,
     recheck_after: str | None = None,
     error_signature: str | None = None,
+    fix_paths: dict[str, str] | None = None,
 ) -> str:
     """Revise an existing memory when it is outdated or wrong.
 
@@ -530,7 +531,19 @@ def update_memory(
     not change; references to the id stay valid).
     Provide only the fields that change. If you only have a vague recollection
     of the memory, find its exact id via list_memories or search_memory first.
+
+    fix_paths: {"old/path.py": "new/path.py"} rewrites file references after a
+    rename/move, in place (same id, no new version), in the content and in
+    depends_on. Use it alone, without other fields.
     """
+    if fix_paths:
+        if any(v is not None for v in (title, content, tags, depends_on, evidence,
+                                       source_url, recheck_after, error_signature)):
+            return "REJECTED: use fix_paths on its own (then update other fields separately)."
+        try:
+            return _dump(memory_store.fix_paths(memory_id, fix_paths))
+        except MemoryError as exc:
+            return f"REJECTED: {exc}"
     try:
         m = memory_store.update(memory_id, title=title, content=content, tags=tags,
                                 depends_on=depends_on, evidence=evidence,
@@ -601,8 +614,11 @@ def retire_memory(memory_id: str, reason: str, replaced_by: str | None = None) -
 @_guard
 def confirm_memory(memory_id: str) -> str:
     """Record that you checked a flagged memory against the current code/docs
-    and it is STILL TRUE. review_memories and briefings stop flagging it
-    (until an even newer memory on the same topic appears)."""
+    and it is STILL TRUE. review_memories and briefings stop flagging it:
+    files it names that are missing right now are accepted (only a file that
+    goes missing later re-flags it), a passed recheck date is cleared, and
+    dependency hashes are refreshed. A newer memory that replaces it still
+    flags it."""
     try:
         return _dump(memory_store.confirm(memory_id))
     except MemoryError as exc:

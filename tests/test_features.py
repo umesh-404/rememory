@@ -461,6 +461,49 @@ def test_memory_ids_and_review_rules() -> None:
           memories._tracked_suffix(frozenset({"apps/web/tests/setup.ts"}), "tests/setup.ts"))
 
 
+def test_missing_file_history() -> None:
+    """Deleted vs renamed files, from git; written-after-deletion is history."""
+    import subprocess
+
+    from memory_mcp import memories
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        def git(*a):
+            subprocess.run(["git", "-C", tmp, *a], check=True, capture_output=True)
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (root / "src").mkdir()
+        (root / "src" / "old_name.py").write_text("def f():\n    return 1\n" * 20)
+        (root / "src" / "doomed.py").write_text("x = 1\n")
+        (root / "src" / "keep.py").write_text("y = 2\n")
+        git("add", "-A")
+        git("commit", "-qm", "one")
+        git("mv", "src/old_name.py", "src/new_name.py")
+        git("rm", "-q", "src/doomed.py")
+        git("commit", "-qm", "two")
+        payload = {"title": "Notes", "content": "See src/old_name.py, src/doomed.py, "
+                   "src/keep.py and src/never_there.py."}
+        tracked = memories._tracked_files(root)
+        missing = memories._missing_refs(root, payload, tracked)
+        check("missing refs found", missing == ["src/old_name.py", "src/doomed.py",
+                                                "src/never_there.py"], str(missing))
+        hist = memories._path_history(root, missing)
+        check("rename detected", hist.get("src/old_name.py", (0, 0))[1] == "src/new_name.py",
+              str(hist))
+        check("deletion dated, no rename",
+              hist.get("src/doomed.py", (None, 1))[0] is not None
+              and hist["src/doomed.py"][1] is None, str(hist))
+        check("never-tracked path has no history", "src/never_there.py" not in hist)
+        check("'safe to delete' is not a deletion record",
+              not memories._said_gone("Test note naming src/x.py; safe to delete.", "src/x.py"))
+        check("title recording a removal suppresses the flag",
+              memories._missing_refs(root, {"title": "Pipecat removed", "content":
+                                            "src/doomed.py"}, tracked) == [])
+
+
 def test_search_intent() -> None:
     from types import SimpleNamespace
 
@@ -485,7 +528,8 @@ def main() -> int:
     for t in (test_briefing, test_localdb, test_facts, test_testmap, test_symbols,
               test_git_hooks, test_agent_hook_installers, test_agent_hook_output,
               test_auto_supersede_is_narrow, test_symbol_spans,
-              test_memory_ids_and_review_rules, test_search_intent):
+              test_memory_ids_and_review_rules, test_search_intent,
+              test_missing_file_history):
         print(t.__name__)
         try:
             t()

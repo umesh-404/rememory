@@ -230,6 +230,44 @@ async def main() -> int:
                                  reason="test cleanup: retired by the MCP verification run")
                 check("retire_memory marks it superseded", "retired" in ret, ret[:80])
 
+                # Missing-file flag: confirm accepts it; fix_paths repairs in place.
+                top = next((d.name for d in sorted(Path(root).iterdir())
+                            if d.is_dir() and not d.name.startswith(".")), None)
+                if top:
+                    gone = f"{top}/zz_mcp_test_missing_file.py"
+                    a = json.loads(await call(
+                        "store_memory", project=write_project, memory_type="implementation",
+                        title="MCP test: names a missing file (confirm)",
+                        content=f"Test memory naming {gone} which does not exist; test-only, "
+                                f"cleaned up by the run. Verifies confirm_memory accepts missing files.",
+                        allow_duplicate=True))["stored"]
+                    b = json.loads(await call(
+                        "store_memory", project=write_project, memory_type="implementation",
+                        title="MCP test: names a missing file (fix_paths)",
+                        content=f"Second test memory naming {gone}, to be repointed at "
+                                f"{dep_file} by fix_paths; test-only.",
+                        allow_duplicate=True))["stored"]
+                    extra_ids += [a, b]
+                    rv = await call("review_memories", project=write_project, limit=50)
+                    check("missing file flagged", a in rv and b in rv, rv[:120])
+                    conf = json.loads(await call("confirm_memory", memory_id=a[:8]))
+                    check("confirm accepts the missing file",
+                          conf.get("accepted_missing_files") == [gone], str(conf)[:120])
+                    fixed = json.loads(await call("update_memory", memory_id=b,
+                                                  fix_paths={gone: dep_file}))
+                    check("fix_paths repairs in place (same id)",
+                          fixed.get("fixed_in_place") == b, str(fixed)[:120])
+                    body = json.loads(await call("get_memory", memory_id=b))
+                    check("fix_paths rewrote the content",
+                          gone not in body["content"] and dep_file in body["content"])
+                    rv = await call("review_memories", project=write_project, limit=50)
+                    check("confirmed / fixed memories no longer flagged",
+                          a not in rv and b not in rv, rv[:200])
+                    bad = await call("update_memory", memory_id=b,
+                                     fix_paths={dep_file: f"{top}/nope_missing.py"})
+                    check("fix_paths refuses a target that does not exist",
+                          bad.startswith("REJECTED"), bad[:80])
+
             fix = json.loads(await call(
                 "store_memory", project=write_project, memory_type="fix",
                 title="MCP test: ZZQ-TEST-ERROR fix",
