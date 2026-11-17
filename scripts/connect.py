@@ -94,11 +94,27 @@ def main() -> int:
     (ROOT / "mcp-config.json").write_text(generic + "\n", encoding="utf-8")
 
     is_windows = platform.system() == "Windows"
-    desktop_cfg = (
-        "%APPDATA%\\Claude\\claude_desktop_config.json" if is_windows
-        else "~/Library/Application Support/Claude/claude_desktop_config.json (macOS)"
-             " or ~/.config/Claude/claude_desktop_config.json (Linux)"
-    )
+    # Fix any existing Claude Desktop entry that still launches via uv, and
+    # name the config files that really exist (MSIX installs do NOT use
+    # %APPDATA%\Claude -- that folder only holds a marker file there).
+    import sys
+
+    sys.path.insert(0, root)
+    from memory_mcp.clients import desktop_config_paths, heal_client_configs
+
+    healed = heal_client_configs()
+    found = desktop_config_paths()
+    if found:
+        desktop_cfg = "\n    ".join(str(p) for p in found)
+        if healed:
+            desktop_cfg += "\n  (its uv-based rememory entry was just switched to the venv interpreter)"
+    else:
+        desktop_cfg = (
+            "%APPDATA%\\Claude\\claude_desktop_config.json (Store/MSIX app:"
+            " %LOCALAPPDATA%\\Claude-Data\\<id>\\claude_desktop_config.json)" if is_windows
+            else "~/Library/Application Support/Claude/claude_desktop_config.json (macOS)"
+                 " or ~/.config/Claude/claude_desktop_config.json (Linux)"
+        )
     arg_str = " ".join(f'"{a}"' if " " in a else a for a in args)
     env_flags = " ".join(f'-e "{k}={v}"' for k, v in env.items())
 

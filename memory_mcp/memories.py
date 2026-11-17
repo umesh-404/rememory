@@ -614,14 +614,27 @@ class MemoryStore:
     # ----------------------------------------------------------------- review
     REVIEW_TTL = 600.0
 
-    def review(self, project: str, root=None, limit: int = 20) -> list[dict[str, Any]]:
+    def review(self, project: str, root=None, limit: int = 20,
+               memory_id: str | None = None) -> list[dict[str, Any]]:
+        """Probably-stale memories, strongest evidence first. With memory_id,
+        just that memory's flags (empty if it is not flagged)."""
+        everything = self._review_all(project, root)
+        if memory_id:
+            mid = self.resolve_id(memory_id)
+            return [r for r in everything if r["id"] == mid]
+        return everything[:limit]
+
+    def review_total(self, project: str, root=None) -> int:
+        return len(self._review_all(project, root))
+
+    def _review_all(self, project: str, root=None) -> list[dict[str, Any]]:
         import time
 
-        key = (project, str(root), limit)
+        key = (project, str(root))
         hit = self._review_cache.get(key)
         if hit and time.monotonic() - hit[0] < self.REVIEW_TTL:
             return hit[1]
-        result = self._review(project, root, limit)
+        result = self._review(project, root, limit=10**9)
         self._review_cache[key] = (time.monotonic(), result)
         return result
 
@@ -785,6 +798,23 @@ class MemoryStore:
         out = []
         for i, reasons in flags.items():
             pl = rows[i].payload or {}
+            contradiction = i in newer_of or bool(_SELF_RETIRED_RE.match(pl.get("title") or ""))
+            # Tier by strength of evidence, so a pile of weak flags can never
+            # push hard evidence past the limit (an active project easily has
+            # hundreds of "file changed" flags):
+            #   0 contradiction (a newer memory replaces it / self-retired)
+            #   1 a file it names is gone, or its recheck date has passed
+            #   2 a file it depends on changed (often an unrelated edit)
+            #   3 merely old
+            if contradiction:
+                tier = 0
+            elif any(r.startswith(("mentions files that no longer exist", "recheck date"))
+                     for r in reasons):
+                tier = 1
+            elif any(r.startswith("suspect:") for r in reasons):
+                tier = 2
+            else:
+                tier = 3
             out.append({
                 "id": str(rows[i].id),
                 "title": pl.get("title"),
@@ -792,13 +822,11 @@ class MemoryStore:
                 "created_at": pl.get("created_at"),
                 "reason": "; ".join(reasons),
                 "preview": (pl.get("content") or "")[:200],
-                "_contradiction": i in newer_of or bool(_SELF_RETIRED_RE.match(
-                    pl.get("title") or "")),
+                "_tier": tier,
             })
-        # Contradiction candidates first (most dangerous), then oldest first.
-        out.sort(key=lambda r: (not r["_contradiction"], r["created_at"] or ""))
+        out.sort(key=lambda r: (r["_tier"], r["created_at"] or ""))
         for r in out:
-            r.pop("_contradiction")
+            r.pop("_tier")
         return out[:limit]
 
     # ------------------------------------------------------------------- list

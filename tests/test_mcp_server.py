@@ -248,8 +248,14 @@ async def main() -> int:
                                 f"{dep_file} by fix_paths; test-only.",
                         allow_duplicate=True))["stored"]
                     extra_ids += [a, b]
-                    rv = await call("review_memories", project=write_project, limit=50)
-                    check("missing file flagged", a in rv and b in rv, rv[:120])
+                    # Per-memory review: a busy project can have more flags
+                    # than the list limit, so check these two by id.
+                    ra = await call("review_memories", project=write_project, memory_id=a)
+                    rb = await call("review_memories", project=write_project, memory_id=b[:8])
+                    check("missing file flagged", "no longer exist" in ra
+                          and "no longer exist" in rb, ra[:120])
+                    rv = await call("review_memories", project=write_project, limit=5)
+                    check("review reports the total flagged", '"total"' in rv, rv[:80])
                     conf = json.loads(await call("confirm_memory", memory_id=a[:8]))
                     check("confirm accepts the missing file",
                           conf.get("accepted_missing_files") == [gone], str(conf)[:120])
@@ -260,9 +266,10 @@ async def main() -> int:
                     body = json.loads(await call("get_memory", memory_id=b))
                     check("fix_paths rewrote the content",
                           gone not in body["content"] and dep_file in body["content"])
-                    rv = await call("review_memories", project=write_project, limit=50)
+                    ra = await call("review_memories", project=write_project, memory_id=a)
+                    rb = await call("review_memories", project=write_project, memory_id=b)
                     check("confirmed / fixed memories no longer flagged",
-                          a not in rv and b not in rv, rv[:200])
+                          "not flagged" in ra and "not flagged" in rb, ra[:80] + " | " + rb[:80])
                     bad = await call("update_memory", memory_id=b,
                                      fix_paths={dep_file: f"{top}/nope_missing.py"})
                     check("fix_paths refuses a target that does not exist",

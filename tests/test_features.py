@@ -523,13 +523,43 @@ def test_search_intent() -> None:
           [x.n for x in prefer_types(pool, ("fix",), 4)] == [1, 2, 3, 4])
 
 
+def test_client_config_heal() -> None:
+    """A Claude Desktop entry that launches rememory via `uv run` (which makes
+    uv rebuild -- and on Windows gut -- the venv) is rewritten to the venv
+    interpreter; other servers and settings are left untouched."""
+    import memory_mcp.clients as clients
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "claude_desktop_config.json"
+        cfg.write_text(json.dumps({
+            "mcpServers": {"rememory": {"command": r"C:\x\uv.EXE", "args": ["run"]},
+                           "other": {"command": "uv"}},
+            "preferences": {"name": "café"}}, ensure_ascii=False), encoding="utf-8")
+        orig = clients.desktop_config_paths, clients.venv_python
+        clients.desktop_config_paths = lambda: [cfg]
+        clients.venv_python = lambda: Path(sys.executable)
+        try:
+            changed = clients.heal_client_configs(quiet=True)
+            again = clients.heal_client_configs(quiet=True)
+        finally:
+            clients.desktop_config_paths, clients.venv_python = orig
+        out = json.loads(cfg.read_text(encoding="utf-8"))
+        check("uv-based rememory entry rewritten", changed == [cfg], str(changed))
+        check("entry launches the venv interpreter",
+              out["mcpServers"]["rememory"]["args"] == ["-m", "memory_mcp.server"])
+        check("other servers untouched", out["mcpServers"]["other"] == {"command": "uv"})
+        check("other settings untouched", out["preferences"]["name"] == "café")
+        check("backup kept", cfg.with_name(cfg.name + ".rememory-bak").exists())
+        check("second run is a no-op", again == [])
+
+
 def main() -> int:
     print("feature tests (no services required)\n")
     for t in (test_briefing, test_localdb, test_facts, test_testmap, test_symbols,
               test_git_hooks, test_agent_hook_installers, test_agent_hook_output,
               test_auto_supersede_is_narrow, test_symbol_spans,
               test_memory_ids_and_review_rules, test_search_intent,
-              test_missing_file_history):
+              test_missing_file_history, test_client_config_heal):
         print(t.__name__)
         try:
             t()

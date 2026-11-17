@@ -627,7 +627,7 @@ def confirm_memory(memory_id: str) -> str:
 
 @app.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
 @_guard
-def review_memories(project: str, limit: int = 15) -> str:
+def review_memories(project: str, limit: int = 15, memory_id: str | None = None) -> str:
     """List active memories that are PROBABLY STALE, with the reason for each.
 
     Flags: a newer memory says it replaces this one's id (or restates it
@@ -639,14 +639,25 @@ def review_memories(project: str, limit: int = 15) -> str:
     CLAUDE.md, then: update_memory (rewrite it), retire_memory (no longer
     true), or confirm_memory (still true). Run it when the briefing shows
     'Check before trusting', or after a big change lands.
+
+    Ordered by strength of evidence: contradictions, then missing files /
+    passed recheck dates, then changed files, then merely old. `total` is how
+    many are flagged in all. Pass memory_id (full or short) to see why one
+    specific memory is flagged.
     """
     if err := _bad_project(project):
         return err
-    items = memory_store.review(project, root=cfg.projects[project].root,
-                                limit=_clamp(limit, 1, 50))
+    root = cfg.projects[project].root
+    if memory_id:
+        items = memory_store.review(project, root=root, memory_id=memory_id)
+        if not items:
+            return f"Memory {memory_id} is not flagged as stale."
+        return _dump({"count": 1, "items": items})
+    items = memory_store.review(project, root=root, limit=_clamp(limit, 1, 50))
     if not items:
         return "No likely-stale memories found."
-    return _dump({"count": len(items), "items": items,
+    return _dump({"count": len(items), "total": memory_store.review_total(project, root=root),
+                  "items": items,
                   "next": "For each: update_memory, retire_memory, or confirm_memory."})
 
 

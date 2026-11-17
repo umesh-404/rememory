@@ -344,6 +344,11 @@ def ensure_services() -> None:
     heal returned before Ollama was even looked at, and nothing was logged.
     """
     pin_venv_to_minor_link()
+    try:  # a client launching us via `uv run` would gut the venv next time
+        from .clients import heal_client_configs
+        heal_client_configs()
+    except Exception:  # noqa: BLE001 -- startup heal must never break the server
+        pass
     _ensure_ollama()
     _ensure_qdrant()
 
